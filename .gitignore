@@ -1,0 +1,9 @@
+*.ckpt
+*.out
+*.sh
+*/wandb/
+*/lightning_logs/
+*/__pycache__
+datasets/sveta/*
+datasets/dataset_loading/*
+*.pyc

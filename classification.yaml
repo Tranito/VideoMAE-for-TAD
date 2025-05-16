@@ -1,0 +1,26 @@
+trainer:
+  logger:
+   class_path: lightning.pytorch.loggers.wandb.WandbLogger
+   init_args:
+     resume: allow
+     name: "classification"
+     project: "vitin1k"
+  devices: 1
+  num_nodes: 1
+  max_steps: 50000
+  val_check_interval: 10000
+  check_val_every_n_epoch: null
+model:
+  class_path: training.classification.Classification
+  init_args:
+    network:
+      class_path: models.classification.vit_classification.VITClassification
+      init_args:
+        model_name: "dinov2_vitb14"
+        num_classes: 2
+data:
+  class_path: datasets.imagenet1k_datamodule.ImageNet1kDataModule
+  init_args:
+    batch_size: 7
+    train_num_workers: 8
+    img_size: 224
