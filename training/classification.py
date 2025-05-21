@@ -22,12 +22,12 @@ class Classification(lightning.LightningModule):
             batch_size: int,
             img_size: int,
             network: nn.Module,
-            lr: float = 5e-5,
+            lr: float = 2e-5,
             lr_multiplier: float = 0.01,
-            layerwise_lr_decay: float = 1.0,
+            layerwise_lr_decay: float = 0.6,
             poly_lr_decay_power: float = 0.9,
             warmup_iters: int = 1500,
-            weight_decay: float = 0.01,
+            weight_decay: float = 0.05,
             ignore_index: int = 255,
             lr_mode: str = "warmuplinear",
             use_strong_aug_source: bool = False,
@@ -80,7 +80,15 @@ class Classification(lightning.LightningModule):
 
         b_image, b_target = batch[0], batch[1]
         source_logits = self.network(b_image)
+        # print(f"b_target: {b_target}")
+        # print(f"source_logits: {source_logits}")
+        # print(f"source_logits shape: {source_logits.shape}")
+
         loss_source = F.cross_entropy(source_logits, b_target)
+        # print(b_image.shape, b_image.min(), b_image.max())
+        # print(b_target.shape, b_target)
+        # print(source_logits.shape, source_logits)
+        # exit(0)
         self.manual_backward(loss_source)
         opt.step()
         self.lr_schedulers().step()
@@ -106,8 +114,8 @@ class Classification(lightning.LightningModule):
     ):
         # print(f"batch: {batch}")
         b_image, b_target = batch[0], batch[1]
-        print(b_image.shape)
-        print(b_target.shape)
+        # print(b_image.shape)
+        # print(b_target.shape)
         with torch.no_grad():
             b_pred = self.network(b_image)
             b_pred = b_pred.argmax(dim=1)
@@ -152,55 +160,16 @@ class Classification(lightning.LightningModule):
             self.log(f"learning_rate/group_{i}", param_group["lr"], on_step=True)
 
     def configure_optimizers(self):
-        current_params = {
-            name
-            for name, param in self.network.named_parameters()
-            if param.requires_grad
-        }
+
 
         optim_weights = {param
             for name, param in self.network.named_parameters()
             if param.requires_grad}
+        # print(f"optim_weights: {optim_weights}")
+        # exit(0)
+        print(f"lr: {self.lr}")
 
-        # lr = (
-        #         self.lr
-        #         * math.sqrt(self.batch_size * self.trainer.num_devices * self.trainer.num_nodes)
-        # )
-
-        # param_defs, current_params = process_parameters(
-        #     self.network.param_defs_decoder, current_params
-        # )
-        # param_groups = [get_param_group(param_defs, lr)]
-
-        # lr *= self.lr_multiplier
-
-        # n_blocks = max(
-        #     len(blocks) for _, blocks in self.network.param_defs_encoder_blocks
-        # )
-
-        # for i in range(n_blocks - 1, -1, -1):
-        #     for block_name_prefix, blocks in self.network.param_defs_encoder_blocks:
-        #         if i < len(blocks):
-        #             block_params = blocks[i].parameters()
-        #             block_param_names = get_full_names(
-        #                 blocks[i], f"{block_name_prefix}.{i}"
-        #             )
-        #             current_params -= block_param_names
-        #             param_groups.append(get_param_group(block_params, lr))
-
-        #     lr *= self.layerwise_lr_decay
-
-        # param_defs, current_params = process_parameters(
-        #     self.network.param_defs_encoder_stems, current_params
-        # )
-        # param_groups.append(get_param_group(param_defs, lr))
-
-        # if current_params:
-        #     raise ValueError(
-        #         f"The following parameters are not included in the optimizer: {current_params}"
-        #     )
-
-        optimizer = torch.optim.AdamW(optim_weights, weight_decay=self.weight_decay)
+        optimizer = torch.optim.AdamW(optim_weights, weight_decay=self.weight_decay, lr=self.lr, betas=(0.9, 0.999))
 
         if self.lr_mode == "poly":
             lr_scheduler = {

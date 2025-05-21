@@ -19,9 +19,19 @@ class VITClassification(nn.Module):
         self.patch_size = patch_size
         self.num_classes = num_classes
 
-        self.model = VisionTransformer(patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), num_classes=self.num_classes)
+        self.model = VisionTransformer(patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), num_classes=self.num_classes, use_flash_attn=False) #, drop_path_rate=0.2)
 
+        # load pre-trained VideoMAE weights
+        url = "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/distill/vit_s_k710_dl_from_giant.pth"
+        ckpt = torch.hub.load_state_dict_from_url(url)['module']
+
+        filtered_weights = {k:v for k, v in ckpt.items() if k in self.model.state_dict() and v.shape == self.model.state_dict()[k].shape}   
+
+        filtered_weights["head.weight"] = self.model.head.weight
+        filtered_weights["head.bias"] = self.model.head.bias
+
+        self.model.load_state_dict(filtered_weights, strict=True)
 
     def forward(self, clip):
         b, c, n, h, w = clip.shape
