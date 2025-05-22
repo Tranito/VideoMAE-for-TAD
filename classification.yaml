@@ -3,7 +3,7 @@ trainer:
    class_path: lightning.pytorch.loggers.wandb.WandbLogger
    init_args:
      resume: allow
-     name: "classification lr=2e-5"
+     name: "classification lr=2e-5 attn fix"
      project: "vitin1k"
   devices: 1
   num_nodes: 1
@@ -21,6 +21,6 @@ model:
 data:
   class_path: datasets.imagenet1k_datamodule.ImageNet1kDataModule
   init_args:
-    batch_size: 16
+    batch_size: 80
     train_num_workers: 8
     img_size: 224

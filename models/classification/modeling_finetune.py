@@ -84,6 +84,7 @@ class Attention(nn.Module):
         #     self.inner_attn = FlashAttention(attention_dropout=attn_drop)
 
     def _naive_attn(self, x):
+        # N = (spatial patches per frame) × (number of tubelets)
         B, N, C = x.shape
         qkv_bias = None
         if self.q_bias is not None:
@@ -101,11 +102,13 @@ class Attention(nn.Module):
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B, N, -1)
+
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
     
     def _flash_attn(self, x):
+        # N = (spatial patches per frame) × (number of tubelets)
         B, N, _ = x.shape
         qkv_bias = None
         if self.q_bias is not None:
@@ -119,14 +122,21 @@ class Attention(nn.Module):
         qkv = F.linear(x, weight=self.qkv.weight, bias=qkv_bias)
         # Reshape to [B, N, 3, num_heads, -1]
         qkv = qkv.reshape(B, N, 3, self.num_heads, -1)
+        
         # Alternatively, you could also use rearrange:
         # qkv = rearrange(qkv, "b s (three h d) -> b s three h d", three=3, h=self.num_heads)
         
         # Call flash attention module (flash op expects the qkv in a similar shape)
         # context, _ = self.inner_attn(qkv, causal=self.causal)
 
+        # each vector has shape [B, N, num_heads, d]
         q, k, v = qkv.unbind(2)  # unpack qkv
+
+        # F.scaled_dot_product_attention expects [B, num_heads, N, d]
+        q, k, v = q.permute(0, 2, 1, 3), k.permute(0, 2, 1, 3), v.permute(0, 2, 1, 3)
+        
         x = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=0.0)
+        x = x.permute(0, 2, 1, 3)  # [B, N, num_heads, d]
         
         # context is expected to be of shape [B, N, num_heads, d]
         x = self.proj(x.view(B, N, -1))
