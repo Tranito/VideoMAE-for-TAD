@@ -3,16 +3,17 @@ trainer:
    class_path: lightning.pytorch.loggers.wandb.WandbLogger
    init_args:
      resume: allow
-     name: "classification lr=2e-5 attn fix"
+     name: "DOTA lr=5e-4 b32, all_aug, balanced, lyr dcy 0.6 and drop path 0.2"
      project: "vitin1k"
   devices: 1
   num_nodes: 1
-  max_steps: 50000
-  val_check_interval: 10000
+  max_steps: 20000
+  val_check_interval: 1000
   check_val_every_n_epoch: null
 model:
   class_path: training.classification.Classification
   init_args:
+    lr_mode: "warmuplinear"
     network:
       class_path: models.classification.vit_classification.VITClassification
       init_args:
@@ -21,6 +22,6 @@ model:
 data:
   class_path: datasets.imagenet1k_datamodule.ImageNet1kDataModule
   init_args:
-    batch_size: 80
-    train_num_workers: 8
+    batch_size: 32
+    train_num_workers: 6
     img_size: 224

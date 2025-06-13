@@ -6,8 +6,8 @@ import torch.nn.functional as F
 from timm.models.layers import drop_path, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 import torch.utils.checkpoint as checkpoint
-
-# from flash_attention_class import FlashAttention
+from models.classification.masking_generator import TubeMaskingGenerator
+from models.classification.token_masking import TokenMasking
 
 
 def _cfg(url='', **kwargs):
@@ -79,9 +79,7 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
 
         self.use_flash_attn = use_flash_attn
-        # if use_flash_attn:
-        #     self.causal = causal
-        #     self.inner_attn = FlashAttention(attention_dropout=attn_drop)
+
 
     def _naive_attn(self, x):
         # N = (spatial patches per frame) × (number of tubelets)
@@ -123,12 +121,6 @@ class Attention(nn.Module):
         # Reshape to [B, N, 3, num_heads, -1]
         qkv = qkv.reshape(B, N, 3, self.num_heads, -1)
         
-        # Alternatively, you could also use rearrange:
-        # qkv = rearrange(qkv, "b s (three h d) -> b s three h d", three=3, h=self.num_heads)
-        
-        # Call flash attention module (flash op expects the qkv in a similar shape)
-        # context, _ = self.inner_attn(qkv, causal=self.causal)
-
         # each vector has shape [B, N, num_heads, d]
         q, k, v = qkv.unbind(2)  # unpack qkv
 
@@ -256,6 +248,10 @@ class VisionTransformer(nn.Module):
         num_patches = self.patch_embed.num_patches
         self.use_checkpoint = use_checkpoint
 
+        # uncomment when using token masking
+        # self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        # self.token_masking = TokenMasking(self.mask_token)
+
         if use_flash_attn:
             print("Using Flash Attention!")
 
@@ -316,12 +312,36 @@ class VisionTransformer(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x):
+        B, C, T, H, W = x.size()
         x = self.patch_embed(x)
-        B, _, _ = x.size()
+        # x: [B, N_patches, embed_dim]
+        B, _, EMBED_DIM = x.size()
+
+        masking_ratio = 0.0
+
+        # do token masking if training, else the same data is returned
+        # if masking_ratio > 0.0:
+        #     x = self.token_masking(x, masking_ratio)
 
         if self.pos_embed is not None:
             x = x + self.pos_embed.expand(B, -1, -1).type_as(x).to(x.device).clone().detach()
         x = self.pos_drop(x)
+
+
+        # old token masking
+        
+        # if self.training:
+        #     tube_mask_gen = TubeMaskingGenerator((T//2, H // 16, W // 16), 0.1)
+        #     tube_mask = tube_mask_gen()
+
+        #     tube_mask = torch.from_numpy(tube_mask).to(x.device).bool()  # shape: [T * num_patches_per_frame]
+        #     tube_mask = tube_mask.unsqueeze(0).expand(B, -1)
+        #     mask_token = nn.Parameter(torch.zeros(1, 1, EMBED_DIM))
+
+        #     # Apply mask
+        #     x = x.clone()
+        #     x[tube_mask] = self.mask_token.type_as(x)  # Masked tokens replaced by mask_token
+
 
         if self.use_checkpoint:
             for blk in self.blocks:

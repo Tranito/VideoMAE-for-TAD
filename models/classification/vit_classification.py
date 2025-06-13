@@ -12,7 +12,7 @@ class VITClassification(nn.Module):
             img_size: int,
             model_name: str,
             num_classes: int,
-            patch_size: int = 14,
+            patch_size: int = 14, 
     ):
         super().__init__()
         self.img_size = img_size
@@ -20,7 +20,7 @@ class VITClassification(nn.Module):
         self.num_classes = num_classes
 
         self.model = VisionTransformer(patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), num_classes=self.num_classes, use_flash_attn=True) #, drop_path_rate=0.2)
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), num_classes=self.num_classes, use_flash_attn=True, drop_path_rate=0.2)#, fc_drop_rate=0.2)
 
         # load pre-trained VideoMAE weights
         url = "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/distill/vit_s_k710_dl_from_giant.pth"
@@ -31,6 +31,10 @@ class VITClassification(nn.Module):
         filtered_weights["head.weight"] = self.model.head.weight
         filtered_weights["head.bias"] = self.model.head.bias
 
+        # path = "/media/vmae_s_dota_lr1e3_b56x1_dsampl1val2_ld06_aam6n3/checkpoint-16.pth"
+        # ckpt = torch.load(path, map_location="cpu")
+
+        #Only set strict to False for token masking
         self.model.load_state_dict(filtered_weights, strict=True)
 
     def forward(self, clip):

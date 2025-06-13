@@ -7,3 +7,5 @@
 datasets/sveta/*
 datasets/dataset_loading/*
 *.pyc
+pkl_files_for_videos/*
+*.ipynb

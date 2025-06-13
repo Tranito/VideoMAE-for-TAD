@@ -1306,12 +1306,12 @@ def pad_wide_clips(h, w, crop_size):
         'reflect', 'reflect',
         'replicate', 'replicate'
         )
-    choice = torch.randint(0, len(_PAD_MODES), (1,)).item()
+    choice = 5
     padding_mode = _PAD_MODES[choice]
     h_to_sq = w - h
     if (padding_mode is not None) and h_to_sq > 0:
-        pad_top = int(round(torch.rand(1).item() * 0.5 * h_to_sq))
-        pad_bottom = int(round(torch.rand(1).item() * 0.5 * h_to_sq))
+        pad_top = h_to_sq
+        pad_bottom = 0
         a = torch.rand(1).item() * 0.7
         if padding_mode == "reflect":
             def _do_pad(x, alpha):
