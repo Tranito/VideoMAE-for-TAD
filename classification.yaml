@@ -3,7 +3,7 @@ trainer:
    class_path: lightning.pytorch.loggers.wandb.WandbLogger
    init_args:
      resume: allow
-     name: "DOTA lr=5e-4 b32, all_aug, balanced, lyr dcy 0.6 and drop path 0.2"
+     name: "DOTA lr=2.5e-5 b32, all_aug, balanced, lyr dcy 0.6 and drop path 0.2"
      project: "vitin1k"
   devices: 1
   num_nodes: 1

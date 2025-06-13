@@ -49,7 +49,10 @@ def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_num_layer=N
 
         if group_name not in parameter_group_names:
             if get_layer_scale is not None:
-                scale = get_layer_scale(layer_id)
+                # if layer_id < 13:
+                #     scale = get_layer_scale(layer_id)/100
+                # else:
+                    scale = get_layer_scale(layer_id)
             else:
                 scale = 1.
 

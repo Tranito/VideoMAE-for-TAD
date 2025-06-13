@@ -53,7 +53,7 @@ class ImageNet1kDataModule(CustomLightningDataModule):
 
         # Dataset parameters
         "num_frames": 16,
-        "data_path": "/media/datasets_sveta/DoTA_refined" if dataset == "dota" else "/media/datasets_sveta/DADA2000",
+        "data_path": self.root+"/DoTA_refined" if dataset == "dota" else self.root+"/DADA2000",
         "nb_classes": 2,
         "sampling_rate": 1,
         "sampling_rate_val": 1,

@@ -31,6 +31,12 @@ class VITClassification(nn.Module):
         filtered_weights["head.weight"] = self.model.head.weight
         filtered_weights["head.bias"] = self.model.head.bias
 
+        # uncomment when using second training strategy
+        # filtered_weights["fc_norm.weight"] = self.model.fc_norm.weight
+        # filtered_weights["fc_norm.bias"] = self.model.fc_norm.bias
+        # filtered_weights["linear.weight"] = self.model.linear.weight
+        # filtered_weights["linear.bias"] = self.model.linear.bias
+
         # path = "/media/vmae_s_dota_lr1e3_b56x1_dsampl1val2_ld06_aam6n3/checkpoint-16.pth"
         # ckpt = torch.load(path, map_location="cpu")
 
