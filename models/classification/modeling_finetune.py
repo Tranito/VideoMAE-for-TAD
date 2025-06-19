@@ -249,7 +249,8 @@ class VisionTransformer(nn.Module):
         self.use_checkpoint = use_checkpoint
 
         # uncomment when using token masking
-        # self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        # self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim), requires_grad=False)
+        # uncomment when using random masking
         # self.token_masking = TokenMasking(self.mask_token)
 
         if use_flash_attn:
@@ -275,7 +276,7 @@ class VisionTransformer(nn.Module):
         self.norm = nn.Identity() if final_reduction == "fc_norm" else norm_layer(embed_dim)
         self.fc_norm = norm_layer(embed_dim) if final_reduction == "fc_norm" else None
         self.fc_dropout = nn.Dropout(p=fc_drop_rate) if fc_drop_rate > 0 else nn.Identity()
-        # self.linear = nn.Linear(embed_dim, embed_dim)
+        self.linear = nn.Linear(embed_dim, embed_dim)
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
 
@@ -325,24 +326,21 @@ class VisionTransformer(nn.Module):
         # if masking_ratio > 0.0:
         #     x = self.token_masking(x, masking_ratio)
 
-        if self.pos_embed is not None:
-            x = x + self.pos_embed.expand(B, -1, -1).type_as(x).to(x.device).clone().detach()
-        x = self.pos_drop(x)
-
-
-        # old token masking
-        
+        # # old token masking
         # if self.training:
-        #     tube_mask_gen = TubeMaskingGenerator((T//2, H // 16, W // 16), 0.1)
+        #     tube_mask_gen = TubeMaskingGenerator((T//2, H // 16, W // 16), 0.4)
         #     tube_mask = tube_mask_gen()
 
         #     tube_mask = torch.from_numpy(tube_mask).to(x.device).bool()  # shape: [T * num_patches_per_frame]
         #     tube_mask = tube_mask.unsqueeze(0).expand(B, -1)
-        #     mask_token = nn.Parameter(torch.zeros(1, 1, EMBED_DIM))
 
         #     # Apply mask
         #     x = x.clone()
         #     x[tube_mask] = self.mask_token.type_as(x)  # Masked tokens replaced by mask_token
+
+        if self.pos_embed is not None:
+            x = x + self.pos_embed.expand(B, -1, -1).type_as(x).to(x.device).clone().detach()
+        x = self.pos_drop(x)
 
 
         if self.use_checkpoint:
@@ -354,77 +352,19 @@ class VisionTransformer(nn.Module):
 
         x = self.norm(x)  # so features have stable and consistent distribution
 
-        # x = self.linear(x)
-        # x = self.fc_norm(x.mean(1))
-        # x = torch.nn.GELU()(x)
-        # return x
+        x = self.linear(x)
+        x = self.fc_norm(x.mean(1))
+        x = torch.nn.GELU()(x)
+        return x
 
-        if self.final_reduction == "fc_norm":
-            return self.fc_norm(x.mean(1))
-        elif self.final_reduction == "cls":
-            return x[:, 0]
-        else:
-            return x
+        # if self.final_reduction == "fc_norm":
+        #     return self.fc_norm(x.mean(1))
+        # elif self.final_reduction == "cls":
+        #     return x[:, 0]
+        # else:
+        #     return x
 
     def forward(self, x):
         x = self.forward_features(x)
         x = self.head(self.fc_dropout(x))
         return x
-
-
-def vit_small_patch16_224(pretrained=False, **kwargs):
-    model = VisionTransformer(
-        patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    model.default_cfg = _cfg()
-    return model
-
-
-def vit_base_patch16_224(pretrained=False, **kwargs):
-    model = VisionTransformer(
-        patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    model.default_cfg = _cfg()
-    return model
-
-
-def vit_base_patch16_384(pretrained=False, **kwargs):
-    model = VisionTransformer(
-        img_size=384, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    model.default_cfg = _cfg()
-    return model
-
-
-def vit_large_patch16_224(pretrained=False, **kwargs):
-    model = VisionTransformer(
-        patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    model.default_cfg = _cfg()
-    return model
-
-def vit_large_patch16_384(pretrained=False, **kwargs):
-    model = VisionTransformer(
-        img_size=384, patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    model.default_cfg = _cfg()
-    return model
-
-def vit_large_patch16_512(pretrained=False, **kwargs):
-    model = VisionTransformer(
-        img_size=512, patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    model.default_cfg = _cfg()
-    return model
-
-
-def vit_huge_patch16_224(pretrained=False, **kwargs):
-    model = VisionTransformer(
-        patch_size=16, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
-    model.default_cfg = _cfg()
-    return model
-
-
-
-
