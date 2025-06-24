@@ -49,9 +49,9 @@ def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_num_layer=N
 
         if group_name not in parameter_group_names:
             if get_layer_scale is not None:
-                # if layer_id < 13:
-                #     scale = get_layer_scale(layer_id)/100
-                # else:
+                if layer_id < 13:
+                    scale = get_layer_scale(layer_id)/30
+                else:
                     scale = get_layer_scale(layer_id)
             else:
                 scale = 1.
@@ -69,5 +69,5 @@ def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_num_layer=N
 
         parameter_group_vars[group_name]["params"].append(param)
         parameter_group_names[group_name]["params"].append(name)
-    # print("Param groups = %s" % json.dumps(parameter_group_names, indent=2))
+    print("Param groups = %s" % json.dumps(parameter_group_names, indent=2))
     return list(parameter_group_vars.values())

@@ -16,7 +16,7 @@ import pickle
 
 from models.utils.warmup_and_linear_scheduler import WarmupAndLinearScheduler
 
-from metrics import calculate_metrics, calculate_tta, calculate_metrics_multi_class, accuracy_per_frame
+from metrics import calculate_tta, calculate_metrics_multi_class, accuracy_per_frame
 from training.optim_factory import LayerDecayValueAssigner, get_parameter_groups
 
 import matplotlib.pyplot as plt
@@ -31,7 +31,7 @@ class Classification(lightning.LightningModule):
             batch_size: int,
             img_size: int,
             network: nn.Module,
-            lr: float = 5e-4,
+            lr: float = 2.5e-5,
             lr_multiplier: float = 0.01,
             layerwise_lr_decay: float = 0.6,
             poly_lr_decay_power: float = 0.9,
@@ -66,7 +66,7 @@ class Classification(lightning.LightningModule):
         self.val_ds_names = ["val"]
         self.metrics = nn.ModuleList(
             [
-                MulticlassAccuracy(num_classes=self.network.num_classes)
+                MulticlassAccuracy(num_classes=self.network.num_classes, average="micro")
                 for _ in range(len(self.val_ds_names))
             ]
         )
@@ -155,7 +155,7 @@ class Classification(lightning.LightningModule):
             self.all_preds.append(b_pred)
             self.all_labels.append(b_target)
             loss_source = F.cross_entropy(b_pred, b_target)
-            self.log(f"{log_prefix}_loss", loss_source, prog_bar=True)
+            self.log(f"{log_prefix}_loss", loss_source, prog_bar=True, sync_dist=True)
 
             if (batch_idx % 100) == 0:
                 # only send first batch
@@ -231,11 +231,60 @@ class Classification(lightning.LightningModule):
         
         self.all_preds = torch.cat(self.all_preds, dim=0).type(torch.float16) if self.all_preds[0].dtype == torch.int64 else torch.cat(self.all_preds, dim=0)
         self.all_labels = torch.cat(self.all_labels, dim=0)
+        self.clip_infos = torch.tensor(self.clip_infos) if type(self.clip_infos[0]) == tuple else torch.cat(self.clip_infos)
 
-        acc_whole_dataset, f1, auc_roc, ap, mcc_metrics, class_metrics = calculate_metrics_multi_class(self.all_preds, self.all_labels, multi_class=False)
-        mcc_auc, mcc_max, mcc_05 = mcc_metrics
-
+        acc_whole_dataset, f1, auc_roc, ap, mcc_metrics, class_metrics, confmat, mcc_per_class = calculate_metrics_multi_class(self.all_preds, self.all_labels, multi_class=True)
         more_metrics_to_log = [
+            ("f1", f1),
+            ("auc_roc", auc_roc),
+            ("ap", ap),
+        ]
+        if not class_metrics == None:
+            num_classes = 3
+
+            classes = ["non_accident", "ego_class", "non_ego_class"]
+
+            # do not log metrics for non-accident class (0)
+            for i in range(1, num_classes):
+                print(f"i: {i}")
+                recall = class_metrics[3][i]
+
+                try:
+                    if self.global_rank == 0:
+                        recall_tensor = torch.tensor(recall, device=self.device, dtype=torch.float32)
+                        recall_gathered_mean = self.all_gather(recall_tensor)
+                        print(recall_gathered_mean)
+
+                        # wandb.log({
+                        # f"{log_prefix}_{classes[i]}/recall_curve": wandb.plot.line_series(
+                        #     xs=np.arange(0.00, 1.001, 0.01).tolist(),
+                        #     ys=[recall_gathered_mean],
+                        #     title=f"Recall for {classes[i]}",
+                        #     xname="Threshold"
+                        # )
+                        # })
+                        print("recall logged!")
+                except Exception as e:
+                    print(e)                  
+                
+                per_class_metrics = [
+                    ("ap", class_metrics[0][i]),
+                    ("auroc", class_metrics[1][i]),
+                    ("acc", class_metrics[2][i]),
+                    ("mcc_auc", mcc_per_class[0][i]),
+                    ("mcc_max", mcc_per_class[1][i]),
+                    ("mcc_05", mcc_per_class[2][i]),
+                ]
+                
+                for name, value in per_class_metrics:
+                    self.log(
+                        f"{log_prefix}_{classes[i]}/{name}", value, sync_dist=True
+                    )
+            
+                
+        else:
+            mcc_auc, mcc_max, mcc_05 = mcc_metrics
+            more_metrics_to_log = [
             ("f1", f1),
             ("auc_roc", auc_roc),
             ("ap", ap),
@@ -243,42 +292,32 @@ class Classification(lightning.LightningModule):
             ("mcc_max", mcc_max),
             ("mcc_05", mcc_05)
         ]
-
-        
-        # if len(class_metrics) > 0:
-        #     num_classes = 3
-        #     per_class_metrics = {}
-
-        #     # do not log metrics for non-accident class (0)
-        #     for i in range(1, num_classes):
-        #         per_class_metrics[f"class_{i}"] = {
-        #             "ap": class_metrics[0][i],
-        #             "auroc": class_metrics[1][i],
-        #             "acc": class_metrics[2][i],
-        #             "recall": wandb.plot.line_series(xs=np.arange(0.00, 1.001, 0.01).tolist(), 
-        #                                              ys=class_metrics[3][i].tolist(), 
-        #                                              title=f"Recall for class {i}",
-        #                                              keys = f"class_{i}",
-        #                                              xname="Threshold", 
-        #                                              yname="Recall"),
-        #                                              }
-        #     self.log(f"{log_prefix}_{ds_name}_per_class", per_class_metrics, sync_dist=True)
-             
-
-        # TTA
-        if type(self.clip_infos[0])  == tuple:
-            mean_tta, mean_itta = calculate_tta(clip_predictions=self.all_preds, clip_infos=self.clip_infos)
-            more_metrics_to_log.extend([("mean_tta", mean_tta), ("mean_itta", mean_itta)])
-
+            
         for name, value in more_metrics_to_log:
             self.log(
                 f"{log_prefix}_{ds_name}_{name}", value, sync_dist=True
             )
+            
+        self.all_preds = self.all_gather(self.all_preds)
+        self.all_preds = self.all_preds.reshape(-1, *self.all_preds.shape[2:])
+        self.all_labels = self.all_gather(self.all_labels).reshape(-1, *self.all_labels.shape[2:])
+        self.clip_infos = self.all_gather(self.clip_infos)
+        self.clip_infos = self.clip_infos.reshape(-1, 2) if self.clip_infos.ndim > 2 else self.clip_infos.reshape(-1, *self.clip_infos.shape[2:])
+        
 
-        # mean accuracy per 10 frames
-        accuracy_per_distance = accuracy_per_frame(self.all_preds.cpu(), self.clip_infos, self.all_labels.cpu())
-        self.create_bar_chart(accuracy_per_distance, log_prefix, ds_name)
-
+        if self.global_rank == 0:
+            print("everything logged")
+            # TTA
+            if self.clip_infos.ndim > 1:
+                mean_tta, mean_itta = calculate_tta(clip_predictions=self.all_preds, clip_infos=self.clip_infos)
+                # Log these metrics without sync_dist (already global)
+                self.log("mean_tta", mean_tta, sync_dist=False)
+                self.log("mean_itta", mean_itta, sync_dist=False)
+            print("tta logged")
+            accuracy_per_distance = accuracy_per_frame(self.all_preds.cpu(), self.clip_infos.cpu(), self.all_labels.cpu())
+            print("accuracy per frame calculated")
+            self.create_bar_chart(accuracy_per_distance, log_prefix, ds_name)
+            
         self.all_preds, self.all_labels, self.clip_infos = [], [], []
 
     def create_bar_chart(self, accuracy_per_distance, log_prefix, ds_name):
@@ -293,7 +332,7 @@ class Classification(lightning.LightningModule):
         ax.margins(x=-0.02)  # Add some margin to the x-axis
 
         # Log the matplotlib figure as a wandb.Image
-        wandb.log({f"{log_prefix}_{ds_name}_mean_acc_per_10_frames_bar": wandb.Image(fig, caption="Mean Accuracy per 10 Frames Interval")})
+        self.trainer.logger.experiment.log({f"{log_prefix}_{ds_name}_mean_acc_per_10_frames_bar": wandb.Image(fig, caption="Mean Accuracy per 10 Frames Interval")})
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end("val")
@@ -308,7 +347,7 @@ class Classification(lightning.LightningModule):
     def configure_optimizers(self):
         
         # # apply layerwise decay
-        assigner = LayerDecayValueAssigner(list(0.6 ** (self.network.model.get_num_layers() + 1 - i) for i in range(self.network.model.get_num_layers() + 2)))
+        assigner = LayerDecayValueAssigner(list(1 ** (self.network.model.get_num_layers() + 1 - i) for i in range(self.network.model.get_num_layers() + 2)))
         optim_weights = get_parameter_groups(self.network.model, weight_decay=self.weight_decay,
             get_num_layer=assigner.get_layer_id, get_layer_scale=assigner.get_scale, lr = self.lr)
         
