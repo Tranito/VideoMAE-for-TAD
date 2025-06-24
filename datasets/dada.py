@@ -18,6 +18,9 @@ from datasets.dataset_loading.data_utils import smooth_labels, compute_time_vect
 import os
 import zipfile
 from datasets.transform.tensor_normalize import tensor_normalize
+import simplejpeg
+from concurrent.futures import ThreadPoolExecutor
+
 
 class FrameClsDataset_DADA(Dataset):
     """Load your own video classification dataset."""
@@ -48,10 +51,11 @@ class FrameClsDataset_DADA(Dataset):
         self.args = args
         self.aug = False
         self.rand_erase = False
-        # if self.mode in ['train']:
-        #     self.aug = True
-        #     if self.args.reprob > 0:
-        #         self.rand_erase = True
+        self.multi_class = args.multi_class
+        if self.mode in ['train']:
+            self.aug = True
+            if self.args.reprob > 0:
+                self.rand_erase = True
 
         self._read_anno()
         self._prepare_views()
@@ -133,6 +137,12 @@ class FrameClsDataset_DADA(Dataset):
             ttc = compute_time_vector(binary_labels, fps=self.orig_fps, TT=self.ttc_TT, TA=self.ttc_TA)
             smoothed_labels = smooth_labels(labels=torch.Tensor(binary_labels), time_vector=ttc,
                                             before_limit=self.ttc_TT, after_limit=self.ttc_TA)
+            
+            if self.multi_class:
+                if if_ego and (st > -1 and en > -1):
+                    binary_labels = [1 if st <= t <= en else 0 for t in timesteps]
+                if (not if_ego) and (st > -1 and en > -1):
+                    binary_labels = [2 if st <= t <= en else 0 for t in timesteps]
 
             clip_timesteps.append(timesteps)
             clip_binary_labels.append(binary_labels)
@@ -187,13 +197,13 @@ class FrameClsDataset_DADA(Dataset):
         if self.mode == 'train':
             args = self.args
             sample = self.dataset_samples[index]
-            buffer, _, __ = self.load_images_zip(sample, final_resize=False, resize_scale=1.)  # T H W C
+            buffer, _, __ = self.load_images_zip(sample, final_resize=True)  # T H W C
             if len(buffer) == 0:
                 while len(buffer) == 0:
                     warnings.warn("video {} not correctly loaded during training".format(sample))
                     index = np.random.randint(self.__len__())
                     sample = self.dataset_samples[index]
-                    buffer, _, __ = self.load_images_zip(sample, final_resize=False, resize_scale=1.)
+                    buffer, _, __ = self.load_images_zip(sample, final_resize=True)
 
             if args.num_sample > 1:
                 frame_list = []
@@ -231,6 +241,8 @@ class FrameClsDataset_DADA(Dataset):
                     index = np.random.randint(self.__len__())
                     sample = self.dataset_samples[index]
                     buffer, _, __ = self.load_images_zip(sample, final_resize=True)
+            do_pad = video_transforms.pad_wide_clips(buffer[0].shape[0], buffer[0].shape[1], self.crop_size)
+            buffer = [do_pad(img) for img in buffer]       
             buffer = self.data_transform(buffer)
             extra_info = {"ttc": self.ttc[index], "smoothed_labels": self._smoothed_label_array[index]}
             clipID = self.dataset_samples[index][0]
@@ -244,6 +256,8 @@ class FrameClsDataset_DADA(Dataset):
                 index = np.random.randint(self.__len__())
                 sample = self.test_dataset[index]
                 buffer, clip_name, frame_name = self.load_images_zip(sample, final_resize=True)
+            do_pad = video_transforms.pad_wide_clips(buffer[0].shape[0], buffer[0].shape[1], self.crop_size)
+            buffer = [do_pad(img) for img in buffer]
             buffer = self.data_transform(buffer)
             extra_info = {"ttc": self.ttc[index], "clip": clip_name, "frame": frame_name,
                           "smoothed_labels": self._smoothed_label_array[index]}
@@ -295,32 +309,20 @@ class FrameClsDataset_DADA(Dataset):
             buffer = buffer.permute(1, 0, 2, 3)
 
         return buffer
-
-    def load_images(self, dataset_sample, final_resize=False, resize_scale=None):
-        clip_id, frame_seq = dataset_sample
-        clip_name = self.clip_names[clip_id]
-        subclip = clip_name.split("/")[1]
-        timesteps = [self.clip_timesteps[clip_id][idx] for idx in frame_seq]
-        filenames = [f"{subclip}_frame_{ts}{self.video_ext}" for ts in timesteps]
-        view = []
-        for fname in filenames:
-            img = cv2.imread(os.path.join(self.data_path, "frames", clip_name, fname))
-            if img is None:
-                print("Image doesn't exist! ", fname)
-                exit(1)
-            if final_resize:
-                img = cv2.resize(img, dsize=(self.crop_size, self.crop_size), interpolation=cv2.INTER_AREA)
-            elif resize_scale is not None:
-                short_side = min(min(img.shape[:2]), self.short_side_size)
-                target_side = self.crop_size * resize_scale
-                k = target_side / short_side
-                img = cv2.resize(img, dsize=(0,0), fx=k, fy=k, interpolation=cv2.INTER_AREA)
-            else:
-                raise ValueError
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
-            view.append(img)
-        #view = np.stack(view, axis=0)
-        return view, clip_name, filenames[-1]
+    
+    def decode_and_resize(self, file_bytes, crop_size, resize_scale=None, short_side_size=None):
+        img = simplejpeg.decode_jpeg(file_bytes, colorspace='BGR')
+        if resize_scale is not None and short_side_size is not None:
+            short_side = min(img.shape[:2])
+            target_side = crop_size * resize_scale
+            k = target_side / short_side
+            img = cv2.resize(img, dsize=(0, 0), fx=k, fy=k, interpolation=cv2.INTER_AREA)
+        else:
+            width = crop_size
+            height = int(img.shape[0] * width / img.shape[1])
+            img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
+        return img
 
     def load_images_zip(self, dataset_sample, final_resize=False, resize_scale=None):
         clip_id, frame_seq = dataset_sample
@@ -328,27 +330,26 @@ class FrameClsDataset_DADA(Dataset):
         timesteps = [self.clip_timesteps[clip_id][idx] for idx in frame_seq]
         filenames = [f"{str(ts).zfill(4)}{self.video_ext}" for ts in timesteps]
         view = []
-        with zipfile.ZipFile(os.path.join(self.data_path, "frames", clip_name, "images.zip"), 'r') as zipf:
-            for fname in filenames:
-                with zipf.open(fname) as file:
-                    file_bytes = np.frombuffer(file.read(), np.uint8)
-                    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-                if img is None:
-                    print("Image doesn't exist! ", fname)
-                    exit(1)
-                if final_resize:
-                    img = cv2.resize(img, dsize=(self.crop_size, self.crop_size), interpolation=cv2.INTER_AREA)
-                elif resize_scale is not None:
-                    short_side = min(img.shape[:2])
-                    target_side = self.crop_size * resize_scale
-                    k = target_side / short_side
-                    img = cv2.resize(img, dsize=(0,0), fx=k, fy=k, interpolation=cv2.INTER_AREA)
-                else:
-                    raise ValueError
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
-                view.append(img)
-        #view = np.stack(view, axis=0)
-        return view, clip_name, filenames[-1]
+        zip_path = os.path.join(self.data_path, "frames", clip_name, "images.zip")
+
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            file_bytes_list = [zipf.read(fname) for fname in filenames]
+        if final_resize or resize_scale is not None:
+            with ThreadPoolExecutor() as executor:
+                imgs = list(
+                    executor.map(
+                        lambda fb: self.decode_and_resize(
+                            fb,
+                            self.crop_size,
+                            resize_scale=resize_scale,
+                            short_side_size=getattr(self, "short_side_size", None),
+                        ),
+                        file_bytes_list,
+                    )
+                )
+        else:
+            imgs = [simplejpeg.decode_jpeg(fb, colorspace='BGR') for fb in file_bytes_list]
+        return imgs, clip_name, filenames[-1]
 
     def __len__(self):
         if self.mode != 'test':

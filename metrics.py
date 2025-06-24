@@ -165,42 +165,57 @@ def calculate_metrics_multi_class(preds, labels, do_softmax=True, multi_class=Fa
         values = preds
         task = "multiclass"
         average = "macro"
+        num_classes = 3
     else:
         values = preds[:, 1]
         task = "binary"
         average = "binary"
+        num_classes = 2
     
     _, preds = torch.max(preds, 1)
 
-    metr_acc = torchmetrics.functional.accuracy(preds=preds, target=labels, task=task , average=average).item()
-    f1 = torchmetrics.functional.f1_score(preds=preds, target=labels, task=task, average=average).item()
+    metr_acc = torchmetrics.functional.accuracy(preds=preds, target=labels, task=task , average=average, num_classes=num_classes).item()
+    f1 = torchmetrics.functional.f1_score(preds=preds, target=labels, task=task, average=average, num_classes=num_classes).item()
+    confmat = torchmetrics.functional.confusion_matrix(preds=preds, target=labels, task=task, num_classes=num_classes).detach()
 
     auroc = torchmetrics.functional.auroc(
         preds=values,
         target=labels,
         task=task,
         average=average,
-        thresholds=THRESHOLDS
+        thresholds=THRESHOLDS,
+        num_classes=num_classes,
     ).item()
     ap = torchmetrics.functional.average_precision(
         preds=values,
         target=labels,
         task=task,
         average=average,
-        thresholds=THRESHOLDS
+        thresholds=THRESHOLDS,
+        num_classes=num_classes,
     ).item()
 
     # MCC
     mcc_thresholded_vals, per_class_metrics = calculate_MORE_metrics_multi_class(preds=values.detach().cpu(), 
                                                                                  labels=labels.detach().cpu(), 
                                                                                  multi_class=multi_class)
-
-    mcc_max = max(mcc_thresholded_vals)
-    mcc_max_idx = mcc_thresholded_vals.index(mcc_max)
-    idx_05 = THRESHOLDS.index(0.5)
-    mcc_05 = mcc_thresholded_vals[idx_05]
-    mcc_auc = auc(THRESHOLDS, mcc_thresholded_vals)
-    return metr_acc, f1, auroc, ap, (mcc_auc, mcc_max, mcc_05), per_class_metrics
+    mcc_per_class = []
+    if per_class_metrics is not None:
+        # if multi-class, determine mcc values per class except for non-accident class
+        for i in range(0,3):
+            mcc_thresholded_vals = per_class_metrics[-1][i]
+            mcc_max = max(mcc_thresholded_vals)
+            idx_05 = THRESHOLDS.index(0.5)
+            mcc_05 = mcc_thresholded_vals[idx_05]
+            mcc_auc = auc(THRESHOLDS, mcc_thresholded_vals)
+            mcc_per_class.append((mcc_auc, mcc_max, mcc_05))
+    else:
+        mcc_max = max(mcc_thresholded_vals)
+        mcc_max_idx = mcc_thresholded_vals.index(mcc_max)
+        idx_05 = THRESHOLDS.index(0.5)
+        mcc_05 = mcc_thresholded_vals[idx_05]
+        mcc_auc = auc(THRESHOLDS, mcc_thresholded_vals)
+    return metr_acc, f1, auroc, ap, (mcc_auc, mcc_max, mcc_05), per_class_metrics, confmat, mcc_per_class
 
 def calculate_MORE_metrics_multi_class(preds, labels, multi_class=False):
     """
@@ -232,22 +247,26 @@ def calculate_MORE_metrics_multi_class(preds, labels, multi_class=False):
 
     # Compute MCC, precision, and recall for each threshold in THRESHOLDS
     mcc_thresholded_vals = []
+    mcc_thresholded_vals_class = []
+
+    if not multi_class:
+        for t in THRESHOLDS:
+            binary_preds_t = (preds >= t).astype(int)
+            mcc_val = matthews_corrcoef(labels, binary_preds_t)
+            mcc_thresholded_vals.append(mcc_val)
+
+        return mcc_thresholded_vals, None
     
-    for t in THRESHOLDS:
-        binary_preds_t = (preds >= t).astype(int)
-        mcc_val = matthews_corrcoef(labels, binary_preds_t)
-        mcc_thresholded_vals.append(mcc_val)
-    
-    if multi_class:
-        # For multi-class, we need to
+    else:        
         ap_per_class = []
         auroc_per_class = []
         acc_per_class = []
-        recall_per_class_t = []
-        recall_t = []
+        recall_per_class = []
 
+        # calculat metrics for ego and non-ego class and not for non-accident class
         for i in range(preds.shape[1]):
-
+            mcc_thresholded_vals_t = []
+            recall_t = []
             # extract predictions and labels for the current class
             preds_class = preds[:, i]
             labels_class = labels == i
@@ -267,14 +286,19 @@ def calculate_MORE_metrics_multi_class(preds, labels, multi_class=False):
             ap_per_class.append(ap)
 
             for t in THRESHOLDS:
+                
                 binary_preds_t = (preds_class >= t).astype(int)
-                recall = torchmetrics.functional.recall(preds=binary_preds_t, target=labels_class, task="binary").item()
+                recall = torchmetrics.functional.recall(preds=torch.tensor(binary_preds_t), target=labels_class, task="binary").item()
                 recall_t.append(recall)
 
-            recall_per_class_t.apppend(recall_t)
-        return mcc_thresholded_vals, (ap_per_class, auroc_per_class, acc_per_class, recall_per_class_t)
-    else:
-        return mcc_thresholded_vals, None
+                # mcc per class
+                mcc_val = matthews_corrcoef(labels_class, binary_preds_t)
+                mcc_thresholded_vals_t.append(mcc_val)
+
+            mcc_thresholded_vals_class.append(mcc_thresholded_vals_t)
+            recall_per_class.append(recall_t)
+            
+        return mcc_thresholded_vals, (ap_per_class, auroc_per_class, acc_per_class, recall_per_class, mcc_thresholded_vals_class)
 
 def calculate_tta(clip_predictions, clip_infos, fps=10, threshold = 0.5):
     """
@@ -402,17 +426,13 @@ def accuracy_per_frame(preds, clip_infos, labels, threshold=0.5):
     ----------
         accuracy_per_frame (dict): Dictionary with frame distance to anomaly start as keys and mean accuracy as values
     """
-
     grouped = defaultdict(list)
     labels_grouped = defaultdict(list)
-    clip_infos = torch.tensor(clip_infos).cpu() if type(clip_infos[0]) == tuple else torch.cat(clip_infos).cpu()
-
     preds = torch.nn.functional.softmax(preds, dim=1)
     
     # if binary classification take only predictions of accident class
     if preds.shape[1] == 2:
         preds = preds[:,1]
-
     # Group predictions and labels by clip
     if clip_infos.ndim > 1:
         for pred, (clip_id, toa), label in zip(preds, clip_infos, labels):
@@ -429,26 +449,31 @@ def accuracy_per_frame(preds, clip_infos, labels, threshold=0.5):
 
     for clip_info, item in grouped.items():
         labels_item = labels_grouped[clip_info]
-
+        
         if item[0].ndim > 0:
             # for multi-class classification, take the class with the highest probability
-            item_argmax = torch.argmax(torch.tensor(item), dim=1)
+            item_argmax = torch.argmax(torch.stack(item), dim=1)
             item_bins = np.array([argmax if item[clipID][argmax] >= 0.5 else 0 for clipID, argmax in zip(range(len(item)), item_argmax)])
         else:
             item_bins = (np.array(item) >= threshold)
 
         labels_arr = np.array(labels_item)
+        
+        # during sanity check, not all labels from each clips are available, therefore frame-level accuracy cannot be determined for those
+        if np.any(labels_arr > 0):
+            anomaly_start_idx = np.where(labels_arr > 0)[0][0]  # get index where anomaly window starts
+            
+            for frame_idx in range(len(item_bins)):
 
-        anomaly_start_idx = np.where(labels_arr > 0)[0][0]  # get index where anomaly window starts
-        for frame_idx in range(len(item_bins)):
-
-            distance = frame_idx - anomaly_start_idx
-            # print(f"item_bins[frame_idx]: {item_bins[frame_idx]}, labels_arr[frame_idx]: {labels_arr[frame_idx]}")
-            # print(item_bins[frame_idx] == labels_arr[frame_idx])
-            correct = int(item_bins[frame_idx] == labels_arr[frame_idx])
-            # print(int(item_bins[frame_idx] == labels_arr[frame_idx]))
-            correct_counts[distance] += correct
-            total_counts[distance] += 1
+                distance = frame_idx - anomaly_start_idx
+                # print(f"item_bins[frame_idx]: {item_bins[frame_idx]}, labels_arr[frame_idx]: {labels_arr[frame_idx]}")
+                # print(item_bins[frame_idx] == labels_arr[frame_idx])
+                correct = int(item_bins[frame_idx] == labels_arr[frame_idx])
+                # print(int(item_bins[frame_idx] == labels_arr[frame_idx]))
+                correct_counts[distance] += correct
+                total_counts[distance] += 1
+        else:
+            continue
 
     # Compute mean accuracy for each distance
     accuracy_per_distance = {}

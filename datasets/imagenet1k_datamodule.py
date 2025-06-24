@@ -9,7 +9,7 @@ from torchvision.transforms import v2 as TV
 from datasets.utils.custom_lightning_data_module import CustomLightningDataModule
 
 from datasets.build_frame_dataset import build_frame_dataset
-from torch.utils.data import WeightedRandomSampler 
+from torch.utils.data import WeightedRandomSampler, DistributedSampler, Subset
 
 
 class ImageNet1kDataModule(CustomLightningDataModule):
@@ -20,7 +20,7 @@ class ImageNet1kDataModule(CustomLightningDataModule):
             batch_size: int,
             img_size: int,
             train_num_workers: int,
-            val_num_workers: int = 4,
+            val_num_workers: int = 8,
             val_batch_size: int = 32,
             dataset: str = "dota"
     ) -> None:
@@ -54,17 +54,16 @@ class ImageNet1kDataModule(CustomLightningDataModule):
         # Dataset parameters
         "num_frames": 16,
         "data_path": self.root+"/DoTA_refined" if dataset == "dota" else self.root+"/DADA2000",
-        "nb_classes": 2,
         "sampling_rate": 1,
         "sampling_rate_val": 1,
         "view_fps": 10,
         "data_set": "DoTA" if dataset == "dota" else "DADA2K",
+        "multi_class": False,
 
         # Optimizer parameters
         "loss": "crossentropy",
-
-        "multi_class": False,
         }
+        self.extra_args["nb_classes"] = 2 if self.extra_args["multi_class"] is False else 3
 
         self.val_num_workers = val_num_workers
         self.val_batch_size = val_batch_size
@@ -88,30 +87,34 @@ class ImageNet1kDataModule(CustomLightningDataModule):
 
     def train_dataloader(self):
 
-        # introduce weighted sampling to create a balanced trainset
-        count = dict()
-        count[0], count[1] = self.train_dataset._label_array.count(0), self.train_dataset._label_array.count(1)
-        label_weights = {label: 1.0/count for label, count in count.items()}
-        sample_weights = [label_weights[label] for label in self.train_dataset._label_array]
-        generator = torch.Generator()
-        generator.manual_seed(42)
-        sampler = WeightedRandomSampler(weights = sample_weights, num_samples=len(self.train_dataset._label_array), replacement=True, generator=generator)
+        # # introduce weighted sampling to create a balanced trainset
+        # count = dict()
+        # count[0], count[1] = self.train_dataset._label_array.count(0), self.train_dataset._label_array.count(1)
+        # label_weights = {label: 1.0/count for label, count in count.items()}
+        # sample_weights = [label_weights[label] for label in self.train_dataset._label_array]
+        # generator = torch.Generator().manual_seed(42)
+        # weighted_sampler = WeightedRandomSampler(weights = sample_weights, num_samples=len(self.train_dataset._label_array), replacement=True, generator=generator)
+        # balanced_subset = Subset(self.train_dataset, list(weighted_sampler))
+
+        sampler = DistributedSampler(self.train_dataset, shuffle=True, drop_last=True)
 
         return torch.utils.data.DataLoader(
             self.train_dataset,
             drop_last=True,
-            persistent_workers=self.persistent_workers,
+            persistent_workers=True,
             num_workers=self.train_num_workers,
-            pin_memory=self.pin_memory,
+            pin_memory=False,
             batch_size=self.batch_size,
-            sampler = sampler
+            sampler=sampler
         )
 
     def val_dataloader(self):
+        sampler = DistributedSampler(self.val_dataset, shuffle=False, drop_last=True)
         return torch.utils.data.DataLoader(
             self.val_dataset,
             persistent_workers=False,
             num_workers=self.val_num_workers,
-            pin_memory=self.pin_memory,
+            pin_memory=False,
             batch_size=self.val_batch_size,
+            sampler=sampler
         )

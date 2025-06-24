@@ -8,3 +8,4 @@ datasets/sveta/*
 *.pyc
 pkl_files_for_videos/*
 *.ipynb
+*.pkl

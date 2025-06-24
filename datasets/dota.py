@@ -19,6 +19,8 @@ import os
 import zipfile
 from datasets.transform.tensor_normalize import tensor_normalize
 from torchvision.transforms import functional as F
+import simplejpeg
+from concurrent.futures import ThreadPoolExecutor
 
 
 class FrameClsDataset_DoTA(Dataset):
@@ -255,21 +257,21 @@ class FrameClsDataset_DoTA(Dataset):
         h, w, _ = buffer[0].shape
         # Perform data augmentation - vertical padding and horizontal flip
         # add padding
-        do_pad = video_transforms.pad_wide_clips(h, w, self.crop_size)
+        do_pad = video_transforms.pad_wide_clips(h, w, self.crop_size, is_train=False)
         buffer = [do_pad(img) for img in buffer]
 
-        aug_transform = video_transforms.create_random_augment(
-            input_size=(self.crop_size, self.crop_size),
-            auto_augment=args.aa,
-            interpolation=args.train_interpolation,
-            do_transforms=video_transforms.DRIVE_TRANSFORMS
-        )
+        # aug_transform = video_transforms.create_random_augment(
+        #     input_size=(self.crop_size, self.crop_size),
+        #     auto_augment=args.aa,
+        #     interpolation=args.train_interpolation,
+        #     do_transforms=video_transforms.DRIVE_TRANSFORMS
+        # )
 
         # CENTERED CROP take center crop of 720x720 of the image and resize it to self.crop_size
         # buffer = [F.resize(F.center_crop(img, output_size=(720, 720)), [self.crop_size,self.crop_size]) for img in buffer]
 
-        buffer = [transforms.ToPILImage()(frame) for frame in buffer]
-        buffer = aug_transform(buffer)
+        # buffer = [transforms.ToPILImage()(frame) for frame in buffer]
+        # buffer = aug_transform(buffer)
         buffer = [transforms.ToTensor()(img) for img in buffer]
         buffer = torch.stack(buffer) # T C H W
         buffer = buffer.permute(0, 2, 3, 1) # T H W C
@@ -280,55 +282,60 @@ class FrameClsDataset_DoTA(Dataset):
         # T H W C -> C T H W.
         buffer = buffer.permute(3, 0, 1, 2)
 
-        if self.rand_erase:
-            erase_transform = RandomErasing(
-                args.reprob,
-                mode=args.remode,
-                max_count=args.recount,
-                num_splits=args.recount,
-                max_area=0.1,
-                device="cpu",
-            )
-            buffer = buffer.permute(1, 0, 2, 3)
-            buffer = erase_transform(buffer)
-            buffer = buffer.permute(1, 0, 2, 3)
+        # if self.rand_erase:
+        #     erase_transform = RandomErasing(
+        #         args.reprob,
+        #         mode=args.remode,
+        #         max_count=args.recount,
+        #         num_splits=args.recount,
+        #         max_area=0.1,
+        #         device="cpu",
+        #     )
+        #     buffer = buffer.permute(1, 0, 2, 3)
+        #     buffer = erase_transform(buffer)
+        #     buffer = buffer.permute(1, 0, 2, 3)
 
         return buffer
+
+    def decode_and_resize(self, file_bytes, crop_size, resize_scale=None, short_side_size=None):
+        img = simplejpeg.decode_jpeg(file_bytes, colorspace='BGR')
+        if resize_scale is not None and short_side_size is not None:
+            short_side = min(img.shape[:2])
+            target_side = crop_size * resize_scale
+            k = target_side / short_side
+            img = cv2.resize(img, dsize=(0, 0), fx=k, fy=k, interpolation=cv2.INTER_AREA)
+        else:
+            width = crop_size
+            height = int(img.shape[0] * width / img.shape[1])
+            img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
+        return img
 
     def load_images(self, dataset_sample, final_resize=False, resize_scale=None):
         clip_id, frame_seq = dataset_sample
         clip_name = self.clip_names[clip_id]
         timesteps = [self.clip_timesteps[clip_id][idx] for idx in frame_seq]
         filenames = [f"{str(ts).zfill(6)}.jpg" for ts in timesteps]
-        view = []
-        with zipfile.ZipFile(os.path.join(self.data_path, "frames", clip_name, "images.zip"), 'r') as zipf:
-            for fname in filenames:
-                with zipf.open(fname) as file:
-                    file_bytes = np.frombuffer(file.read(), np.uint8)
-                    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-                if img is None:
-                    print("Image doesn't exist! ", fname)
-                    exit(1)
-                if final_resize: 
-                    # img = cv2.resize(img, dsize=(self.crop_size, self.crop_size), interpolation=cv2.INTER_AREA)
-
-                    img = img
-
-                    # # CENTERED CROP take center crop of 720x720 of the image and resize it to self.crop_size
-                    # img = F.resize(F.center_crop(img, output_size=(720, 720)), [self.crop_size,self.crop_size])
-
-                elif resize_scale is not None:
-                    short_side = min(min(img.shape[:2]), self.short_side_size)
-                    target_side = self.crop_size * resize_scale
-                    k = target_side / short_side
-                    img = cv2.resize(img, dsize=(0,0), fx=k, fy=k, interpolation=cv2.INTER_AREA)
-                else:
-                    raise ValueError
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
-
-                view.append(img)
-        #view = np.stack(view, axis=0)
-        return view, clip_name, filenames[-1]
+        zip_path = os.path.join(self.data_path, "frames", clip_name, "images.zip")
+        
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            file_bytes_list = [zipf.read(fname) for fname in filenames]
+        if final_resize or resize_scale is not None:
+            with ThreadPoolExecutor() as executor:
+                imgs = list(
+                    executor.map(
+                        lambda fb: self.decode_and_resize(
+                            fb,
+                            self.crop_size,
+                            resize_scale=resize_scale,
+                            short_side_size=getattr(self, "short_side_size", None),
+                        ),
+                        file_bytes_list,
+                    )
+                )
+        else:
+            imgs = [simplejpeg.decode_jpeg(fb, colorspace='BGR') for fb in file_bytes_list]
+        return imgs, clip_name, filenames[-1]
 
     def __len__(self):
         if self.mode != 'test':
