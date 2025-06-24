@@ -257,21 +257,21 @@ class FrameClsDataset_DoTA(Dataset):
         h, w, _ = buffer[0].shape
         # Perform data augmentation - vertical padding and horizontal flip
         # add padding
-        do_pad = video_transforms.pad_wide_clips(h, w, self.crop_size, is_train=False)
+        do_pad = video_transforms.pad_wide_clips(h, w, self.crop_size, is_train=True)
         buffer = [do_pad(img) for img in buffer]
 
-        # aug_transform = video_transforms.create_random_augment(
-        #     input_size=(self.crop_size, self.crop_size),
-        #     auto_augment=args.aa,
-        #     interpolation=args.train_interpolation,
-        #     do_transforms=video_transforms.DRIVE_TRANSFORMS
-        # )
+        aug_transform = video_transforms.create_random_augment(
+            input_size=(self.crop_size, self.crop_size),
+            auto_augment=args.aa,
+            interpolation=args.train_interpolation,
+            do_transforms=video_transforms.DRIVE_TRANSFORMS
+        )
 
         # CENTERED CROP take center crop of 720x720 of the image and resize it to self.crop_size
         # buffer = [F.resize(F.center_crop(img, output_size=(720, 720)), [self.crop_size,self.crop_size]) for img in buffer]
 
-        # buffer = [transforms.ToPILImage()(frame) for frame in buffer]
-        # buffer = aug_transform(buffer)
+        buffer = [transforms.ToPILImage()(frame) for frame in buffer]
+        buffer = aug_transform(buffer)
         buffer = [transforms.ToTensor()(img) for img in buffer]
         buffer = torch.stack(buffer) # T C H W
         buffer = buffer.permute(0, 2, 3, 1) # T H W C
@@ -282,18 +282,18 @@ class FrameClsDataset_DoTA(Dataset):
         # T H W C -> C T H W.
         buffer = buffer.permute(3, 0, 1, 2)
 
-        # if self.rand_erase:
-        #     erase_transform = RandomErasing(
-        #         args.reprob,
-        #         mode=args.remode,
-        #         max_count=args.recount,
-        #         num_splits=args.recount,
-        #         max_area=0.1,
-        #         device="cpu",
-        #     )
-        #     buffer = buffer.permute(1, 0, 2, 3)
-        #     buffer = erase_transform(buffer)
-        #     buffer = buffer.permute(1, 0, 2, 3)
+        if self.rand_erase:
+            erase_transform = RandomErasing(
+                args.reprob,
+                mode=args.remode,
+                max_count=args.recount,
+                num_splits=args.recount,
+                max_area=0.1,
+                device="cpu",
+            )
+            buffer = buffer.permute(1, 0, 2, 3)
+            buffer = erase_transform(buffer)
+            buffer = buffer.permute(1, 0, 2, 3)
 
         return buffer
 
