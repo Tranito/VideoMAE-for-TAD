@@ -19,8 +19,10 @@ import os
 import zipfile
 from datasets.transform.tensor_normalize import tensor_normalize
 from torchvision.transforms import functional as F
-import simplejpeg
+# import simplejpeg
 from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
+
 
 
 class FrameClsDataset_DoTA(Dataset):
@@ -58,6 +60,9 @@ class FrameClsDataset_DoTA(Dataset):
             self.aug = True
             if self.args.reprob > 0:
                 self.rand_erase = True
+        
+        self.image_cache = OrderedDict()
+        self.max_cache_size = 1000
 
         self._read_anno()
         self._prepare_views()
@@ -297,19 +302,33 @@ class FrameClsDataset_DoTA(Dataset):
 
         return buffer
 
-    def decode_and_resize(self, file_bytes, crop_size, resize_scale=None, short_side_size=None):
-        img = simplejpeg.decode_jpeg(file_bytes, colorspace='BGR')
-        if resize_scale is not None and short_side_size is not None:
-            short_side = min(img.shape[:2])
-            target_side = crop_size * resize_scale
-            k = target_side / short_side
-            img = cv2.resize(img, dsize=(0, 0), fx=k, fy=k, interpolation=cv2.INTER_AREA)
+    def load_and_resize(self, file_path, crop_size, resize_scale=None, short_side_size=None):
+        
+        if len(self.image_cache) > self.max_cache_size:
+            self.image_cache.popitem(last=False)
+            
+        if file_path in self.image_cache and self.mode != "training":
+            img = self.image_cache.pop(file_path)
+            self.image_cache[file_path] = img
+            return img
         else:
-            width = crop_size
-            height = int(img.shape[0] * width / img.shape[1])
-            img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
-        return img
+            img = cv2.imread(file_path)
+            if resize_scale is not None and short_side_size is not None:
+                short_side = min(img.shape[:2])
+                target_side = crop_size * resize_scale
+                k = target_side / short_side
+                img = cv2.resize(img, dsize=(0, 0), fx=k, fy=k, interpolation=cv2.INTER_AREA)
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
+                if self.mode != "training":
+                    self.image_cache[file_path] = img
+            else:
+                width = crop_size
+                height = int(img.shape[0] * width / img.shape[1])
+                img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
+                if self.mode != "training":
+                    self.image_cache[file_path] = img
+            return img
 
     def load_images(self, dataset_sample, final_resize=False, resize_scale=None):
         clip_id, frame_seq = dataset_sample
@@ -318,23 +337,23 @@ class FrameClsDataset_DoTA(Dataset):
         filenames = [f"{str(ts).zfill(6)}.jpg" for ts in timesteps]
         zip_path = os.path.join(self.data_path, "frames", clip_name, "images.zip")
         
-        with zipfile.ZipFile(zip_path, 'r') as zipf:
-            file_bytes_list = [zipf.read(fname) for fname in filenames]
+        clip_path = os.path.join(self.data_path, "frames", clip_name)
+        file_paths =  [os.path.join(clip_path, fname) for fname in filenames]
         if final_resize or resize_scale is not None:
             with ThreadPoolExecutor() as executor:
                 imgs = list(
                     executor.map(
-                        lambda fb: self.decode_and_resize(
+                        lambda fb: self.load_and_resize(
                             fb,
                             self.crop_size,
                             resize_scale=resize_scale,
                             short_side_size=getattr(self, "short_side_size", None),
                         ),
-                        file_bytes_list,
+                        file_paths,
                     )
                 )
         else:
-            imgs = [simplejpeg.decode_jpeg(fb, colorspace='BGR') for fb in file_bytes_list]
+            imgs = [self.load_and_resize(path) for path in file_paths]
         return imgs, clip_name, filenames[-1]
 
     def __len__(self):

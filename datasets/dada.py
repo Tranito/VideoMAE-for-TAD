@@ -18,8 +18,10 @@ from datasets.dataset_loading.data_utils import smooth_labels, compute_time_vect
 import os
 import zipfile
 from datasets.transform.tensor_normalize import tensor_normalize
-import simplejpeg
+# import simplejpeg
 from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
+
 
 
 class FrameClsDataset_DADA(Dataset):
@@ -57,6 +59,9 @@ class FrameClsDataset_DADA(Dataset):
             if self.args.reprob > 0:
                 self.rand_erase = True
 
+        self.image_cache = OrderedDict()
+        self.max_cache_size = 1000
+
         self._read_anno()
         self._prepare_views()
         assert len(self.dataset_samples) > 0
@@ -77,8 +82,8 @@ class FrameClsDataset_DADA(Dataset):
         elif (mode == 'validation'):
             self.data_transform = video_transforms.Compose([
                 volume_transforms.ClipToTensor(),
-                # video_transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                #                            std=[0.229, 0.224, 0.225])
+                 video_transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                            std=[0.229, 0.224, 0.225])
             ])
         elif mode == 'test':
             self.data_resize = video_transforms.Compose([
@@ -86,8 +91,8 @@ class FrameClsDataset_DADA(Dataset):
             ])
             self.data_transform = video_transforms.Compose([
                 volume_transforms.ClipToTensor(),
-                # video_transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                #                            std=[0.229, 0.224, 0.225])
+                 video_transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                            std=[0.229, 0.224, 0.225])
             ])
             self.test_seg = [(0, 0)]
             self.test_dataset = self.dataset_samples
@@ -197,13 +202,13 @@ class FrameClsDataset_DADA(Dataset):
         if self.mode == 'train':
             args = self.args
             sample = self.dataset_samples[index]
-            buffer, _, __ = self.load_images_zip(sample, final_resize=True)  # T H W C
+            buffer, _, __ = self.load_images(sample, final_resize=True)  # T H W C
             if len(buffer) == 0:
                 while len(buffer) == 0:
                     warnings.warn("video {} not correctly loaded during training".format(sample))
                     index = np.random.randint(self.__len__())
                     sample = self.dataset_samples[index]
-                    buffer, _, __ = self.load_images_zip(sample, final_resize=True)
+                    buffer, _, __ = self.load_images(sample, final_resize=True)
 
             if args.num_sample > 1:
                 frame_list = []
@@ -234,13 +239,13 @@ class FrameClsDataset_DADA(Dataset):
 
         elif self.mode == 'validation':
             sample = self.dataset_samples[index]
-            buffer, _, __ = self.load_images_zip(sample, final_resize=True)
+            buffer, _, __ = self.load_images(sample, final_resize=True)
             if len(buffer) == 0:
                 while len(buffer) == 0:
                     warnings.warn("video {} not correctly loaded during validation".format(sample))
                     index = np.random.randint(self.__len__())
                     sample = self.dataset_samples[index]
-                    buffer, _, __ = self.load_images_zip(sample, final_resize=True)
+                    buffer, _, __ = self.load_images(sample, final_resize=True)
             do_pad = video_transforms.pad_wide_clips(buffer[0].shape[0], buffer[0].shape[1], self.crop_size)
             buffer = [do_pad(img) for img in buffer]       
             buffer = self.data_transform(buffer)
@@ -250,12 +255,12 @@ class FrameClsDataset_DADA(Dataset):
 
         elif self.mode == 'test':
             sample = self.test_dataset[index]
-            buffer, clip_name, frame_name = self.load_images_zip(sample, final_resize=True)
+            buffer, clip_name, frame_name = self.load_images(sample, final_resize=True)
             while len(buffer) == 0:
                 warnings.warn("video {} not found during testing".format(str(self.test_dataset[index])))
                 index = np.random.randint(self.__len__())
                 sample = self.test_dataset[index]
-                buffer, clip_name, frame_name = self.load_images_zip(sample, final_resize=True)
+                buffer, clip_name, frame_name = self.load_images(sample, final_resize=True)
             do_pad = video_transforms.pad_wide_clips(buffer[0].shape[0], buffer[0].shape[1], self.crop_size)
             buffer = [do_pad(img) for img in buffer]
             buffer = self.data_transform(buffer)
@@ -274,7 +279,7 @@ class FrameClsDataset_DADA(Dataset):
         h, w, _ = buffer[0].shape
         # Perform data augmentation - vertical padding and horizontal flip
         # add padding
-        do_pad = video_transforms.pad_wide_clips(h, w, self.crop_size)
+        do_pad = video_transforms.pad_wide_clips(h, w, self.crop_size, is_train=True)
         buffer = [do_pad(img) for img in buffer]
 
         aug_transform = video_transforms.create_random_augment(
@@ -310,45 +315,58 @@ class FrameClsDataset_DADA(Dataset):
 
         return buffer
     
-    def decode_and_resize(self, file_bytes, crop_size, resize_scale=None, short_side_size=None):
-        img = simplejpeg.decode_jpeg(file_bytes, colorspace='BGR')
-        if resize_scale is not None and short_side_size is not None:
-            short_side = min(img.shape[:2])
-            target_side = crop_size * resize_scale
-            k = target_side / short_side
-            img = cv2.resize(img, dsize=(0, 0), fx=k, fy=k, interpolation=cv2.INTER_AREA)
+    def load_and_resize(self, file_path, crop_size, resize_scale=None, short_side_size=None):
+        
+        if len(self.image_cache) > self.max_cache_size:
+            self.image_cache.popitem(last=False)
+            
+        if file_path in self.image_cache and self.mode != "train":
+            img = self.image_cache.pop(file_path)
+            self.image_cache[file_path] = img
+            return img
         else:
-            width = crop_size
-            height = int(img.shape[0] * width / img.shape[1])
-            img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
-        return img
+            img = cv2.imread(file_path)
+            if resize_scale is not None and short_side_size is not None:
+                short_side = min(img.shape[:2])
+                target_side = crop_size * resize_scale
+                k = target_side / short_side
+                img = cv2.resize(img, dsize=(0, 0), fx=k, fy=k, interpolation=cv2.INTER_AREA)
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
+                if self.mode != "train":
+                    self.image_cache[file_path] = img
+            else:
+                
+                width = crop_size
+                height = int(img.shape[0] * width / img.shape[1]) if self.mode == "train" else crop_size
+                img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
+                if self.mode != "train":
+                    self.image_cache[file_path] = img
+            return img
 
-    def load_images_zip(self, dataset_sample, final_resize=False, resize_scale=None):
+    def load_images(self, dataset_sample, final_resize=False, resize_scale=None):
         clip_id, frame_seq = dataset_sample
         clip_name = self.clip_names[clip_id]
         timesteps = [self.clip_timesteps[clip_id][idx] for idx in frame_seq]
         filenames = [f"{str(ts).zfill(4)}{self.video_ext}" for ts in timesteps]
-        view = []
-        zip_path = os.path.join(self.data_path, "frames", clip_name, "images.zip")
 
-        with zipfile.ZipFile(zip_path, 'r') as zipf:
-            file_bytes_list = [zipf.read(fname) for fname in filenames]
+        clip_path = os.path.join(self.data_path, "frames", clip_name)
+        file_paths =  [os.path.join(clip_path, fname) for fname in filenames]
         if final_resize or resize_scale is not None:
             with ThreadPoolExecutor() as executor:
                 imgs = list(
                     executor.map(
-                        lambda fb: self.decode_and_resize(
+                        lambda fb: self.load_and_resize(
                             fb,
                             self.crop_size,
                             resize_scale=resize_scale,
                             short_side_size=getattr(self, "short_side_size", None),
                         ),
-                        file_bytes_list,
+                        file_paths,
                     )
                 )
         else:
-            imgs = [simplejpeg.decode_jpeg(fb, colorspace='BGR') for fb in file_bytes_list]
+            imgs = [self.load_and_resize(path) for path in file_paths]
         return imgs, clip_name, filenames[-1]
 
     def __len__(self):
