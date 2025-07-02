@@ -20,10 +20,10 @@ def visualize_predictions_with_clip_and_anomaly(
     dataset='dota',
     clip_names = "",
     phase='val',
-    folder='',
-    fps=10,
+    fps=30,
     graph_height=400,
-    width=800
+    width=800,
+    output_path=""
 ):
     """
     Create a video visualizing predictions and ground truth over time,
@@ -46,7 +46,7 @@ def visualize_predictions_with_clip_and_anomaly(
     assert len(predictions) == len(ground_truth) == len(clip_frames), \
         "Predictions, ground truth, and clip_frames must all be the same length."
     
-    output_dir = os.path.join(folder, dataset, phase)
+    output_dir = os.path.join(output_path, dataset, phase)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -71,10 +71,12 @@ def visualize_predictions_with_clip_and_anomaly(
     if isinstance(clip_keys, tuple):
         filename = f"{dataset}_{phase}_{clip_names.split("/")[0]}_{clip_names.split("/")[1]}.mp4"
     else:
-        filename = f"{dataset}_{phase}_{clip_names}.mp4"
+        filename = f"{dataset}_{phase}_{clip_names}_sorted.mp4"
 
     print(f"filename: {filename}")
-    out = cv2.VideoWriter(os.path.join(output_dir, filename), cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, total_height))
+    full_path = os.path.join(output_dir, filename)
+    print(f"full output path: {os.path.join(output_dir, filename)}")
+    out = cv2.VideoWriter(full_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, total_height))
 
     def draw_anomaly_background(ax, ground_truth):
         in_anomaly = False
@@ -98,14 +100,28 @@ def visualize_predictions_with_clip_and_anomaly(
         ax.plot(predictions, label='Prediction', color='blue')
         if isinstance(clip_keys, tuple):
             ax.plot(ground_truth, label='Ground Truth', color='green')
-            if (clip_keys[1]-45) > 0:    
-                ax.axvline(x=(clip_keys[1]-45), label='Time of Accident Frame', color='red')
+            if (clip_keys[1]-46) > 0:    
+                ax.axvline(x=(clip_keys[1]-46), label='Time of Accident Frame', color='red')
         else:
             ax.plot(ground_truth, label='Ground Truth', color='green')
+
+        xticks = np.arange(0, num_frames, step=20)
+        
+        if dataset == "dota":
+            xticklabels = xticks + 15
+        else:
+            xticklabels = xticks + 46
+
+        ax.set_xticks(xticks)
+        ax.set_xticklabels(xticklabels)
+
         ax.axvline(x=i, color='black', linewidth=2, label='Current Frame')
         ax.set_xlim(0, num_frames)
         ax.set_ylim(0, 1)
         ax.set_title("Anomaly Detection - Prediction vs Ground Truth")
+        ax.axhline(y=0.5, color='orange', linestyle="--", linewidth=2, label='Threshold')
+        ax.set_xlabel('Frame number')
+        ax.set_ylabel('Score')
 
         # Render plot to image
         canvas.draw()
@@ -162,9 +178,9 @@ def read_annotations_dota(data_path, multi_class=False, mode="train"):
 
         if multi_class:
             if if_ego:
-                binary_labels = [[0, 1, 0] if l > 0 else [0,0,0] for l in cat_labels]
+                binary_labels = [1 if l > 0 else 0 for l in cat_labels]
             else:
-                binary_labels = [[0, 0, 1] if l > 0 else [0,0,0] for l in cat_labels]
+                binary_labels = [2 if l > 0 else 0 for l in cat_labels]
 
         clip_timesteps.append(timesteps)
         clip_binary_labels.append(binary_labels)
@@ -253,7 +269,7 @@ def read_annotations_dada(data_path, multi_class=False, mode="train"):
         return clip_names, clip_timesteps, clip_binary_labels, clip_ego, clip_night, clip_toa 
 
 
-def process_clip(clip_key, preds_grouped, labels_grouped, clip_names, clip_timesteps, dataset, folder, phase, fps, width, graph_height):
+def process_clip(clip_key, preds_grouped, labels_grouped, clip_names, clip_timesteps, dataset, folder, phase, fps, width, graph_height, output_path):
     # Find the index of the clip in clip_names
     if isinstance(clip_key, tuple):
         clip_id = clip_key[0]
@@ -287,13 +303,14 @@ def process_clip(clip_key, preds_grouped, labels_grouped, clip_names, clip_times
         dataset=dataset,
         clip_names=clip_name,
         phase=phase,
-        folder="/media/vmae_predictions",
+        output_path=output_path,
         fps=fps,
         width=width,
         graph_height=graph_height
     )
 
-def create_and_visualize_videos(preds, labels, clip_infos, dataset="dota", output_path="/media/vmae_predictions", fps=10, phase="val", width=800, graph_height=400):
+def create_and_visualize_videos(preds, labels, clip_infos, dataset="dota", output_path="/home/ltran/vmae_predictions", fps=30, phase="val", width=800, graph_height=400):
+        
     from collections import defaultdict
     preds_grouped = defaultdict(list)
     labels_grouped = defaultdict(list)
