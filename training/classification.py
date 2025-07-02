@@ -31,7 +31,7 @@ class Classification(lightning.LightningModule):
             batch_size: int,
             img_size: int,
             network: nn.Module,
-            lr: float = 2.5e-5,
+            lr: float = 1e-5,
             lr_multiplier: float = 0.01,
             layerwise_lr_decay: float = 0.6,
             poly_lr_decay_power: float = 0.9,
@@ -42,6 +42,7 @@ class Classification(lightning.LightningModule):
             use_strong_aug_source: bool = False,
             use_pointrend: bool = True,
             ckpt_path: Optional[str] = None,
+            multi_class: bool = False,
 
     ):
         super().__init__()
@@ -59,6 +60,7 @@ class Classification(lightning.LightningModule):
         self.use_strong_aug_source = use_strong_aug_source
         self.use_pointrend = use_pointrend
         self.save_hyperparameters()
+        self.multi_class = multi_class
 
         self.network = network
 
@@ -101,6 +103,7 @@ class Classification(lightning.LightningModule):
         self.all_preds = []
         self.all_labels = []
         self.clip_infos = []
+        self.sample_idx = []
 
     def get_optimizers(self):
         opt = self.optimizers()
@@ -141,7 +144,7 @@ class Classification(lightning.LightningModule):
             dataloader_idx: int,
             log_prefix: str,
     ):
-        b_image, b_target = batch[0], batch[1]
+        b_image, b_target, sample_idx = batch[0], batch[1], batch[2]
 
         # b_image = (B, C, T, H, W)
         if len(batch) == 5:
@@ -154,6 +157,7 @@ class Classification(lightning.LightningModule):
             b_pred = self.network(b_image)
             self.all_preds.append(b_pred)
             self.all_labels.append(b_target)
+            self.sample_idx.append(sample_idx)
             loss_source = F.cross_entropy(b_pred, b_target)
             self.log(f"{log_prefix}_loss", loss_source, prog_bar=True, sync_dist=True)
 
@@ -232,8 +236,9 @@ class Classification(lightning.LightningModule):
         self.all_preds = torch.cat(self.all_preds, dim=0).type(torch.float16) if self.all_preds[0].dtype == torch.int64 else torch.cat(self.all_preds, dim=0)
         self.all_labels = torch.cat(self.all_labels, dim=0)
         self.clip_infos = torch.tensor(self.clip_infos) if type(self.clip_infos[0]) == tuple else torch.cat(self.clip_infos)
+        self.sample_idx = torch.cat(self.sample_idx)
 
-        acc_whole_dataset, f1, auc_roc, ap, mcc_metrics, class_metrics, confmat, mcc_per_class = calculate_metrics_multi_class(self.all_preds, self.all_labels, multi_class=True)
+        acc_whole_dataset, f1, auc_roc, ap, mcc_metrics, class_metrics, confmat, mcc_per_class = calculate_metrics_multi_class(self.all_preds, self.all_labels, multi_class=self.multi_class)
         more_metrics_to_log = [
             ("f1", f1),
             ("auc_roc", auc_roc),
@@ -300,39 +305,59 @@ class Classification(lightning.LightningModule):
             
         self.all_preds = self.all_gather(self.all_preds)
         self.all_preds = self.all_preds.reshape(-1, *self.all_preds.shape[2:])
+
         self.all_labels = self.all_gather(self.all_labels).reshape(-1, *self.all_labels.shape[2:])
+
         self.clip_infos = self.all_gather(self.clip_infos)
         self.clip_infos = self.clip_infos.reshape(-1, 2) if self.clip_infos.ndim > 2 else self.clip_infos.reshape(-1, *self.clip_infos.shape[2:])
-        
+
+        self.sample_idx = self.all_gather(self.sample_idx).reshape(-1, *self.clip_infos.shape[2:]) 
+
+        # sort preds, labels, clip_infos
+        # this to preserve the order in each clip for calculating TTA and accuracy per frame distance w.r.t. start anomaly window/time of accident frame
+        sorted_indices = self.sample_idx.argsort()    
+        self.all_preds, self.all_labels, self.clip_infos = self.all_preds[sorted_indices], self.all_labels[sorted_indices], self.clip_infos[sorted_indices]
 
         if self.global_rank == 0:
-            print("everything logged")
+            
             # TTA
             if self.clip_infos.ndim > 1:
-                mean_tta, mean_itta = calculate_tta(clip_predictions=self.all_preds, clip_infos=self.clip_infos)
-                # Log these metrics without sync_dist (already global)
-                self.log("mean_tta", mean_tta, sync_dist=False)
-                self.log("mean_itta", mean_itta, sync_dist=False)
-            print("tta logged")
+                thresholds = np.arange(0, 1.0, 0.1)
+                all_ttas = []
+                
+                for threshold in thresholds:
+                    tta, itta = calculate_tta(clip_predictions=self.all_preds, clip_infos=self.clip_infos, threshold=threshold)
+                    all_ttas.append(tta)
+
+                    if threshold == 0.5:
+                        itta_0_5 = itta
+                        tta_0_5 = tta       
+                        # Log these metrics without sync_dist (already global)
+                        self.log("tta_0_5", tta_0_5, sync_dist=False)
+                        self.log("itta_0_5", itta_0_5, sync_dist=False)
+
+                mtta = np.mean(all_ttas)
+                self.log("mtta", mtta, sync_dist=False)
+                all_ttas = []
+
             accuracy_per_distance = accuracy_per_frame(self.all_preds.cpu(), self.clip_infos.cpu(), self.all_labels.cpu())
-            print("accuracy per frame calculated")
             self.create_bar_chart(accuracy_per_distance, log_prefix, ds_name)
             
-        self.all_preds, self.all_labels, self.clip_infos = [], [], []
+        self.all_preds, self.all_labels, self.clip_infos, self.sample_idx = [], [], [], []
 
     def create_bar_chart(self, accuracy_per_distance, log_prefix, ds_name):
         fig, ax = plt.subplots(figsize=(50, 5))
-        plt.title("mean accuracy per frame distance with respect to anomaly window start")
+        plt.title("mean accuracy per frame distance w.r.t anomaly window start")
         colors = ['red' if k == 0 else 'blue' for k in accuracy_per_distance.keys()]
         plt.bar([str(key) for key in accuracy_per_distance.keys()], accuracy_per_distance.values(), width=0.3, color=colors)
         plt.ylabel("Mean accuracy [%]");
         plt.xlabel("Frame interval");
-        plt.xticks(fontsize=10);
+        plt.xticks(fontsize=8);
         plt.xticks(rotation=90);
         ax.margins(x=-0.02)  # Add some margin to the x-axis
 
         # Log the matplotlib figure as a wandb.Image
-        self.trainer.logger.experiment.log({f"{log_prefix}_{ds_name}_mean_acc_per_10_frames_bar": wandb.Image(fig, caption="Mean Accuracy per 10 Frames Interval")})
+        self.trainer.logger.experiment.log({f"{log_prefix}_{ds_name}_mean_acc_per_frames_dist": wandb.Image(fig, caption="Mean Accuracy per Frames Distance w.r.t. Anomaly Window Start")})
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end("val")
@@ -347,7 +372,7 @@ class Classification(lightning.LightningModule):
     def configure_optimizers(self):
         
         # # apply layerwise decay
-        assigner = LayerDecayValueAssigner(list(1 ** (self.network.model.get_num_layers() + 1 - i) for i in range(self.network.model.get_num_layers() + 2)))
+        assigner = LayerDecayValueAssigner(list(self.layerwise_lr_decay ** (self.network.model.get_num_layers() + 1 - i) for i in range(self.network.model.get_num_layers() + 2)))
         optim_weights = get_parameter_groups(self.network.model, weight_decay=self.weight_decay,
             get_num_layer=assigner.get_layer_id, get_layer_scale=assigner.get_scale, lr = self.lr)
         
@@ -385,7 +410,7 @@ class Classification(lightning.LightningModule):
                 "scheduler": torch.optim.lr_scheduler.CosineAnnealingLR(
                     optimizer,
                     T_max=self.trainer.max_steps,
-                    eta_min=1e-5,
+                    eta_min=1e-6,
                 ),
                 "interval": "step",
             }

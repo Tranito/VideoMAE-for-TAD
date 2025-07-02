@@ -3,25 +3,38 @@ trainer:
    class_path: lightning.pytorch.loggers.wandb.WandbLogger
    init_args:
      resume: allow
-     name: "DOTA lr=2.5e-5 b32, all_aug, balanced, lyr dcy 0.6 and drop path 0.2"
+     name: "DADA lr=1e-5 b32, all_aug, no padding validation, kinetics settings"
      project: "vitin1k"
   devices: 1
   num_nodes: 1
   max_steps: 20000
-  val_check_interval: 1000
+  val_check_interval: 4000
   check_val_every_n_epoch: null
 model:
   class_path: training.classification.Classification
   init_args:
-    lr_mode: "warmuplinear"
+    lr: 1e-5
+    layerwise_lr_decay: 0.9
+    lr_mode: "cosine_annealing"
     network:
       class_path: models.classification.vit_classification.VITClassification
       init_args:
         model_name: VideoMAE V2 ViT Small K710
+        # change this to 3 when using multi-class classification
         num_classes: 2
 data:
   class_path: datasets.imagenet1k_datamodule.ImageNet1kDataModule
   init_args:
+
     batch_size: 32
-    train_num_workers: 6
+    train_num_workers: 6  
+
+    val_batch_size: 32
+    val_num_workers: 4
+    
     img_size: 224
+    num_frames: 16
+    sampling_rate: 1
+    sampling_rate_val: 1
+    view_fps: 10
+    multi_class: False

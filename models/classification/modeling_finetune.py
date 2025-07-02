@@ -276,7 +276,7 @@ class VisionTransformer(nn.Module):
         self.norm = nn.Identity() if final_reduction == "fc_norm" else norm_layer(embed_dim)
         self.fc_norm = norm_layer(embed_dim) if final_reduction == "fc_norm" else None
         self.fc_dropout = nn.Dropout(p=fc_drop_rate) if fc_drop_rate > 0 else nn.Identity()
-        self.linear = nn.Linear(embed_dim, embed_dim)
+        # self.linear = nn.Linear(embed_dim, embed_dim)
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
 
@@ -352,17 +352,17 @@ class VisionTransformer(nn.Module):
 
         x = self.norm(x)  # so features have stable and consistent distribution
 
-        x = self.linear(x)
-        x = self.fc_norm(x.mean(1))
-        x = torch.nn.GELU()(x)
-        return x
+        # x = self.linear(x)
+        # x = self.fc_norm(x.mean(1))
+        # x = torch.nn.GELU()(x)
+        # return x
 
-        # if self.final_reduction == "fc_norm":
-        #     return self.fc_norm(x.mean(1))
-        # elif self.final_reduction == "cls":
-        #     return x[:, 0]
-        # else:
-        #     return x
+        if self.final_reduction == "fc_norm":
+            return self.fc_norm(x.mean(1))
+        elif self.final_reduction == "cls":
+            return x[:, 0]
+        else:
+            return x
 
     def forward(self, x):
         x = self.forward_features(x)

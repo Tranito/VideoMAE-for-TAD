@@ -20,9 +20,14 @@ class ImageNet1kDataModule(CustomLightningDataModule):
             batch_size: int,
             img_size: int,
             train_num_workers: int,
-            val_num_workers: int = 8,
+            val_num_workers: int = 4,
             val_batch_size: int = 32,
-            dataset: str = "dota"
+            dataset: str = "dota",
+            num_frames: int = 16,
+            sampling_rate: int = 1,
+            sampling_rate_val: int = 1,
+            view_fps: int = 10,
+            multi_class: bool = False,
     ) -> None:
         super().__init__(
             root=root,
@@ -31,11 +36,10 @@ class ImageNet1kDataModule(CustomLightningDataModule):
             img_size=img_size,
             train_num_workers=train_num_workers,
         )
-        
 
         self.extra_args = {
         # Model parameters
-        "input_size": 224,
+        "input_size": img_size,
 
         # Augmentation parameters
         "num_sample": 1,
@@ -52,13 +56,13 @@ class ImageNet1kDataModule(CustomLightningDataModule):
         "recount": 1,
 
         # Dataset parameters
-        "num_frames": 16,
+        "num_frames": num_frames,
         "data_path": self.root+"/DoTA_refined" if dataset == "dota" else self.root+"/DADA2000",
-        "sampling_rate": 1,
-        "sampling_rate_val": 1,
-        "view_fps": 10,
+        "sampling_rate": sampling_rate,
+        "sampling_rate_val": sampling_rate_val,
+        "view_fps": view_fps,
         "data_set": "DoTA" if dataset == "dota" else "DADA2K",
-        "multi_class": False,
+        "multi_class": multi_class,
 
         # Optimizer parameters
         "loss": "crossentropy",
@@ -70,12 +74,16 @@ class ImageNet1kDataModule(CustomLightningDataModule):
 
         self.save_hyperparameters(ignore=['_class_path', "class_path", "init_args"])
 
+        
+
  
 
     def setup(self, stage: Union[str, None] = None) -> CustomLightningDataModule:
 
         print(f"loading {self.extra_args['data_set']} dataset from {self.extra_args['data_path']}")
-
+        print(f"num_frames per window: {self.extra_args['num_frames']}, sampling_rate: {self.extra_args['sampling_rate']}, sampling_rate_val: {self.extra_args['sampling_rate_val']}, target_fps: {self.extra_args['view_fps']}")
+        if self.extra_args["multi_class"]:
+            print("Using multi-class classification") 
 
         self.train_dataset, _ = build_frame_dataset(is_train=True, test_mode=False, args=self.extra_args)
         self.val_dataset, _ = build_frame_dataset(is_train=False, test_mode=False, args=self.extra_args)

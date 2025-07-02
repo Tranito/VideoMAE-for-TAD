@@ -29,8 +29,9 @@ class LightningCLI(cli.LightningCLI):
         parser.link_arguments("data.init_args.batch_size", "model.init_args.batch_size")
         parser.link_arguments("data.init_args.img_size", "model.init_args.img_size")
         parser.link_arguments("data.init_args.img_size", "model.init_args.network.init_args.img_size")
-
         
+        parser.link_arguments("data.init_args.num_frames", "model.init_args.network.init_args.all_frames")
+        parser.link_arguments("data.init_args.multi_class", "model.init_args.multi_class")
 
     def fit(self, model, **kwargs):
         if hasattr(self.trainer.logger.experiment, "log_code"):
