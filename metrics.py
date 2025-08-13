@@ -275,12 +275,12 @@ def accuracy_per_frame(preds, clip_infos, labels, threshold=0.5):
         labels_arr = np.array(labels_item)
         
         # during sanity check, not all labels from each clips are available, therefore frame-level accuracy cannot be determined for those
-        if np.any(labels_arr > 0):
-            anomaly_start_idx = np.where(labels_arr > 0)[0][0]  # get index where anomaly window starts
+        if np.any(labels_arr > 0) and isinstance(clip_info, tuple) and clip_info[1] > -1:
+            # anomaly_start_idx = np.where(labels_arr > 0)[0][0]  # get index where anomaly window starts
+            collision_frame = clip_info[1]
             
             for frame_idx in range(len(item_bins)):
-
-                distance = frame_idx - anomaly_start_idx
+                distance = frame_idx - collision_frame
                 correct = int(item_bins[frame_idx] == labels_arr[frame_idx])
                 correct_counts[distance] += correct
                 total_counts[distance] += 1

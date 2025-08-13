@@ -16,14 +16,34 @@ import pickle
 
 from models.utils.warmup_and_linear_scheduler import WarmupAndLinearScheduler
 
-from metrics import calculate_tta, calculate_metrics_multi_class, accuracy_per_frame
+# from metrics import calculate_tta, calculate_metrics_multi_class, accuracy_per_frame
 from training.optim_factory import LayerDecayValueAssigner, get_parameter_groups
+from new_metrics import metrics, prediction_lead_time
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 import matplotlib.pyplot as plt
 import wandb
 from PIL import Image
 import io
 
+def focal_loss_multiclass(inputs, targets, alpha=1, gamma=2):
+    """
+    Multi-class focal loss implementation
+    - inputs: raw logits from the model
+    - targets: true class labels (as integer indices, not one-hot encoded)
+    """
+    # Convert logits to log probabilities
+    log_prob = F.log_softmax(inputs, dim=-1)
+    prob = torch.exp(log_prob)  # Calculate probabilities from log probabilities
+
+    # Gather the probabilities corresponding to the correct classes
+    targets_one_hot = F.one_hot(targets, num_classes=inputs.shape[-1])
+    pt = torch.sum(prob * targets_one_hot, dim=-1)
+
+    # Apply focal adjustment
+    focal_loss = -alpha * (1 - pt) ** gamma * torch.sum(log_prob * targets_one_hot, dim=-1)
+    
+    return focal_loss.mean()
 
 class Classification(lightning.LightningModule):
     def __init__(
@@ -39,9 +59,6 @@ class Classification(lightning.LightningModule):
             weight_decay: float = 0.05,
             ignore_index: int = 255,
             lr_mode: str = "warmuplinear",
-            use_strong_aug_source: bool = False,
-            use_pointrend: bool = True,
-            ckpt_path: Optional[str] = None,
             multi_class: bool = False,
 
     ):
@@ -57,8 +74,6 @@ class Classification(lightning.LightningModule):
         self.ignore_index = ignore_index
         self.warmup_iters = warmup_iters
         self.lr_mode = lr_mode
-        self.use_strong_aug_source = use_strong_aug_source
-        self.use_pointrend = use_pointrend
         self.save_hyperparameters()
         self.multi_class = multi_class
 
@@ -73,7 +88,6 @@ class Classification(lightning.LightningModule):
             ]
         )
 
-        self._load_ckpt(ckpt_path)
         self.automatic_optimization = False
 
         # data augmentation on GPU
@@ -116,11 +130,18 @@ class Classification(lightning.LightningModule):
             batch_idx: int,
     ):
         opt = self.get_optimizers()
-        b_image, b_target = batch[0], batch[1]
+        b_image, b_target, b_smooth_target = batch[0], batch[1], batch[-1]
         # b_image = (B, C, T, H, W)
         # b_image = self.process_video_frames(b_image)
         source_logits = self.network(b_image)
-        loss_source = F.cross_entropy(source_logits, b_target)
+
+        # Create mask but don't filter predictions, only use mask for loss calculation
+        mask = b_target != -1
+        b_smooth_target = torch.stack(b_smooth_target).T        
+        # Only calculate loss on non-masked frames
+
+        if mask.sum() > 0:
+            loss_source = F.cross_entropy(source_logits[mask], b_smooth_target[mask]) #, weight = torch.tensor([1/149190, 1/28170, 1/28170, 1/28170, 1/28131, 1/24427], device=self.device))
 
         self.manual_backward(loss_source)
         opt.step()
@@ -146,29 +167,40 @@ class Classification(lightning.LightningModule):
     ):
         b_image, b_target, sample_idx = batch[0], batch[1], batch[2]
 
+        mask = b_target != -1
+
         # b_image = (B, C, T, H, W)
         if len(batch) == 5:
+            # Store all clip info but mark which ones are valid
             self.clip_infos.append(batch[4])
         else:
+            # Store all clip info
             self.clip_infos.extend(zip(batch[4], batch[5]))
         
         with torch.no_grad():
-            # b_image = self.process_video_frames(b_image)  # (B, C, T, H, W)
             b_pred = self.network(b_image)
+            
+            # Store all predictions and create separate mask tensor
             self.all_preds.append(b_pred)
-            self.all_labels.append(b_target)
+            self.all_labels.append(b_target)  # Store all labels including -1
             self.sample_idx.append(sample_idx)
-            loss_source = F.cross_entropy(b_pred, b_target)
-            self.log(f"{log_prefix}_loss", loss_source, prog_bar=True, sync_dist=True)
+
+            # Only calculate loss on valid frames
+            if mask.sum() > 0:
+                loss_source = F.cross_entropy(b_pred[mask], b_target[mask])
+                self.log(f"{log_prefix}_loss", loss_source, prog_bar=True, sync_dist=True)
 
             if (batch_idx % 100) == 0:
                 # only send first batch
                 self._log_img(b_image[0], log_prefix) 
 
-            b_pred = b_pred.argmax(dim=1)
-        self.metrics[dataloader_idx].update(
-            b_pred, b_target
-        )
+            # Only update metrics for valid frames
+            if mask.sum() > 0:
+                b_pred_valid = b_pred[mask].argmax(dim=1)
+                b_target_valid = b_target[mask]
+                self.metrics[dataloader_idx].update(
+                    b_pred_valid, b_target_valid
+                )
 
     @torch.no_grad()
     def _log_img(
@@ -233,131 +265,128 @@ class Classification(lightning.LightningModule):
                 f"{log_prefix}_{ds_name}_acc", acc, sync_dist=True
             )
         
+        # Synchronize to ensure all processes have completed evaluation steps
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        
+        # Concatenate all predictions and labels
         self.all_preds = torch.cat(self.all_preds, dim=0).type(torch.float16) if self.all_preds[0].dtype == torch.int64 else torch.cat(self.all_preds, dim=0)
         self.all_labels = torch.cat(self.all_labels, dim=0)
         self.clip_infos = torch.tensor(self.clip_infos) if type(self.clip_infos[0]) == tuple else torch.cat(self.clip_infos)
         self.sample_idx = torch.cat(self.sample_idx)
 
-        acc_whole_dataset, f1, auc_roc, ap, mcc_metrics, class_metrics, confmat, mcc_per_class = calculate_metrics_multi_class(self.all_preds, self.all_labels, multi_class=self.multi_class)
+        # Create mask for valid labels (not -1)
+        valid_mask = self.all_labels != -1
+        
+        # Calculate metrics only on valid frames
+        valid_preds = self.all_preds[valid_mask]
+        valid_labels = self.all_labels[valid_mask]
+        
+        # acc_whole_dataset, f1, auc_roc, ap, mcc_metrics, class_metrics, confmat, mcc_per_class = calculate_metrics_multi_class(self.all_preds, self.all_labels, multi_class=self.multi_class)
+        acc_whole_dataset, f1, auc_roc, ap, confmat = metrics(valid_preds, valid_labels, do_softmax=True, num_classes=self.network.num_classes)
         more_metrics_to_log = [
             ("f1", f1),
             ("auc_roc", auc_roc),
             ("ap", ap),
-        ]
-        if not class_metrics == None:
-            num_classes = 3
-
-            classes = ["non_accident", "ego_class", "non_ego_class"]
-
-            # do not log metrics for non-accident class (0)
-            for i in range(1, num_classes):
-                print(f"i: {i}")
-                recall = class_metrics[3][i]
-
-                try:
-                    if self.global_rank == 0:
-                        recall_tensor = torch.tensor(recall, device=self.device, dtype=torch.float32)
-                        recall_gathered_mean = self.all_gather(recall_tensor)
-                        print(recall_gathered_mean)
-
-                        # wandb.log({
-                        # f"{log_prefix}_{classes[i]}/recall_curve": wandb.plot.line_series(
-                        #     xs=np.arange(0.00, 1.001, 0.01).tolist(),
-                        #     ys=[recall_gathered_mean],
-                        #     title=f"Recall for {classes[i]}",
-                        #     xname="Threshold"
-                        # )
-                        # })
-                        print("recall logged!")
-                except Exception as e:
-                    print(e)                  
-                
-                per_class_metrics = [
-                    ("ap", class_metrics[0][i]),
-                    ("auroc", class_metrics[1][i]),
-                    ("acc", class_metrics[2][i]),
-                    ("mcc_auc", mcc_per_class[0][i]),
-                    ("mcc_max", mcc_per_class[1][i]),
-                    ("mcc_05", mcc_per_class[2][i]),
-                ]
-                
-                for name, value in per_class_metrics:
-                    self.log(
-                        f"{log_prefix}_{classes[i]}/{name}", value, sync_dist=True
-                    )
-            
-                
-        else:
-            mcc_auc, mcc_max, mcc_05 = mcc_metrics
-            more_metrics_to_log = [
-            ("f1", f1),
-            ("auc_roc", auc_roc),
-            ("ap", ap),
-            ("mcc_auc", mcc_auc),
-            ("mcc_max", mcc_max),
-            ("mcc_05", mcc_05)
         ]
             
         for name, value in more_metrics_to_log:
             self.log(
                 f"{log_prefix}_{ds_name}_{name}", value, sync_dist=True
             )
+        
+        # Synchronize before all-gather operations
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
             
+        # Gather data from all processes
         self.all_preds = self.all_gather(self.all_preds)
         self.all_preds = self.all_preds.reshape(-1, *self.all_preds.shape[2:])
-
         self.all_labels = self.all_gather(self.all_labels).reshape(-1, *self.all_labels.shape[2:])
-
         self.clip_infos = self.all_gather(self.clip_infos)
         self.clip_infos = self.clip_infos.reshape(-1, 2) if self.clip_infos.ndim > 2 else self.clip_infos.reshape(-1, *self.clip_infos.shape[2:])
-
         self.sample_idx = self.all_gather(self.sample_idx).reshape(-1, *self.clip_infos.shape[2:]) 
+        
+        # Synchronize after gathering operations and before sorting
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
         # sort preds, labels, clip_infos
         # this to preserve the order in each clip for calculating TTA and accuracy per frame distance w.r.t. start anomaly window/time of accident frame
         sorted_indices = self.sample_idx.argsort()    
         self.all_preds, self.all_labels, self.clip_infos = self.all_preds[sorted_indices], self.all_labels[sorted_indices], self.clip_infos[sorted_indices]
+        
+        # Update the valid mask after gathering and sorting
+        valid_mask = self.all_labels != -1
+        
+        # Synchronize before rank-specific operations
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        
+        # with open("data_kinetics_settings_new_lbl_balance_metrics_check_code_fix.pkl", "wb") as f:
+        #     pickle.dump({
+        #         "all_preds": self.all_preds.cpu(),
+        #         "all_labels": self.all_labels.cpu(),
+        #         "clip_infos": self.clip_infos.cpu(),
+        #         "sample_idx": self.sample_idx.cpu()
+        #     }, f)
 
         if self.global_rank == 0:
+            # Use only valid frames for prediction lead time calculation
+            valid_mask = self.all_labels != -1
+            valid_preds = self.all_preds[valid_mask].cpu()
+            valid_labels = self.all_labels[valid_mask].cpu()
             
-            # TTA
-            if self.clip_infos.ndim > 1:
-                thresholds = np.arange(0, 1.0, 0.1)
-                all_ttas = []
-                
-                for threshold in thresholds:
-                    tta, itta = calculate_tta(clip_predictions=self.all_preds, clip_infos=self.clip_infos, threshold=threshold)
-                    all_ttas.append(tta)
+            accuracy_per_label, pred_lead_time = prediction_lead_time(valid_preds, valid_labels)
+            self.create_bar_chart(accuracy_per_label, log_prefix, ds_name)
+            self.log("prediction lead time", pred_lead_time, sync_dist=False)
 
-                    if threshold == 0.5:
-                        itta_0_5 = itta
-                        tta_0_5 = tta       
-                        # Log these metrics without sync_dist (already global)
-                        self.log("tta_0_5", tta_0_5, sync_dist=False)
-                        self.log("itta_0_5", itta_0_5, sync_dist=False)
+            self.create_confusion_matrix_plot(valid_preds, valid_labels, log_prefix, ds_name)
 
-                mtta = np.mean(all_ttas)
-                self.log("mtta", mtta, sync_dist=False)
-                all_ttas = []
+        # Final synchronization before clearing data
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
-            accuracy_per_distance = accuracy_per_frame(self.all_preds.cpu(), self.clip_infos.cpu(), self.all_labels.cpu())
-            self.create_bar_chart(accuracy_per_distance, log_prefix, ds_name)
-            
         self.all_preds, self.all_labels, self.clip_infos, self.sample_idx = [], [], [], []
 
-    def create_bar_chart(self, accuracy_per_distance, log_prefix, ds_name):
-        fig, ax = plt.subplots(figsize=(50, 5))
-        plt.title("mean accuracy per frame distance w.r.t anomaly window start")
-        colors = ['red' if k == 0 else 'blue' for k in accuracy_per_distance.keys()]
-        plt.bar([str(key) for key in accuracy_per_distance.keys()], accuracy_per_distance.values(), width=0.3, color=colors)
-        plt.ylabel("Mean accuracy [%]");
-        plt.xlabel("Frame interval");
-        plt.xticks(fontsize=8);
-        plt.xticks(rotation=90);
-        ax.margins(x=-0.02)  # Add some margin to the x-axis
+    def create_confusion_matrix_plot(self, preds, labels, log_prefix, ds_name):
+        predicted_classes = preds.argmax(dim=1).cpu().numpy()
+        true_labels = labels.cpu().numpy()
+        unique_classes = np.unique(np.concatenate([true_labels, predicted_classes]))
+        
+        cm = confusion_matrix(true_labels, predicted_classes, labels=unique_classes)
+        class_names = [str(i) for i in unique_classes]
+        
+        fig, ax = plt.subplots(figsize=(max(8, len(unique_classes)*2), max(6, len(unique_classes)*1.5)))
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
+        disp.plot(ax=ax, cmap='Blues', values_format='d')
+        
+        plt.title(f'Confusion Matrix - {ds_name}')
+        plt.tight_layout()
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.1, dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        PIL_image = Image.open(buf).convert('RGB')
+        
+        self.trainer.logger.experiment.log({
+            f"{log_prefix}_{ds_name}_confusion_matrix": wandb.Image(PIL_image, caption=f"Confusion Matrix - {ds_name}")
+        })
 
-        # Log the matplotlib figure as a wandb.Image
-        self.trainer.logger.experiment.log({f"{log_prefix}_{ds_name}_mean_acc_per_frames_dist": wandb.Image(fig, caption="Mean Accuracy per Frames Distance w.r.t. Anomaly Window Start")})
+    def create_bar_chart(self, accuracy_per_label, log_prefix, ds_name):
+        fig, ax = plt.subplots(figsize=(20, 5))
+        plt.title("Mean accuracy per Label")
+
+            # Create color array - blue for all bars except last one (grey + transparent)
+        colors = ['blue'] * (len(accuracy_per_label) - 1) + ['grey']
+        plt.bar([str(label) for label in range(0, len(accuracy_per_label))][::-1], torch.flip(accuracy_per_label, dims=(0,)).numpy(), width=0.3, color=colors)
+        plt.ylabel("Mean accuracy [-]")
+        plt.xlabel("Label")
+        plt.xticks(fontsize=10, rotation=90)
+        ax.margins(x=-0.02)
+        print(f"Mean accuracy per label (from label 5 to label 0): {torch.flip(accuracy_per_label, dims=(0,)).numpy()}")
+        self.trainer.logger.experiment.log({f"{log_prefix}_{ds_name}_mean_acc_per_label": wandb.Image(fig, caption="Mean Accuracy per label")})
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end("val")
@@ -418,84 +447,3 @@ class Classification(lightning.LightningModule):
             raise Exception("Wrong lr_more: {}".format(self.lr_mode))
 
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
-
-    def _load_ckpt(self, ckpt_path: Optional[str]):
-        if ckpt_path is None:
-            return
-
-        ckpt_state: dict = torch.load(ckpt_path, map_location=self.device)
-
-        if "state_dict" in ckpt_state:
-            ckpt_state = ckpt_state["state_dict"]
-
-        if "model" in ckpt_state:
-            ckpt_state = ckpt_state["model"]
-
-        model_state = self.state_dict()
-        skipped_keys = []
-        for k in ckpt_state:
-            if (k in model_state) and (ckpt_state[k].shape == model_state[k].shape):
-                model_state[k] = ckpt_state[k]
-            else:
-                skipped_keys.append(k)
-
-        info(f"Skipped loading keys: {skipped_keys}")
-
-        self.load_state_dict(model_state)
-
-    def process_video_frames(self, video_data: torch.Tensor) -> torch.Tensor:
-        """
-        Applies color jitter, blur, and normalization per frame for each sample
-        in a batch of video sequences or a single video sequence.
-
-        This function automatically detects if the input is a batch (5 dimensions)
-        or a single video (4 dimensions) and processes it accordingly.
-
-        Args:
-            video_data (torch.Tensor): Input video data.
-                                    Expected shapes:
-                                    - Batch: (B, C, T, H, W)
-                                    - Single: (C, T, H, W)
-
-        Returns:
-            torch.Tensor: The processed video data with the same original shape.
-        """
-        # Check if the input is a single video (C, T, H, W) or a batch (B, C, T, H, W)
-        is_single_sample = False
-        if video_data.ndim == 4:
-            # If it's a single sample, add a batch dimension for consistent processing
-            video_batch = video_data.unsqueeze(0)  # Becomes (1, C, T, H, W)
-            is_single_sample = True
-        elif video_data.ndim == 5:
-            video_batch = video_data
-        else:
-            raise ValueError(
-                f"Input 'video_data' must have 4 or 5 dimensions (C, T, H, W) or (B, C, T, H, W), "
-                f"but got {video_data.ndim} dimensions."
-            )
-
-        B, C, T, H, W = video_batch.shape
-
-        # only apply augmentations during training
-        if self.training:
-            b_image_aug = torch.stack([
-                torch.stack([self.augmentations(video_batch[b, :, t, :, :]) 
-                            for t in range(T)], dim=1) 
-                for b in range(B)
-            ], dim=0) 
-            # Resulting shape: (B, C, T, H, W)
-        else:
-            b_image_aug = video_batch
-
-        b_image_norm = torch.stack([
-            torch.stack([self.norm(b_image_aug[b, :, t, :, :]) 
-                        for t in range(T)], dim=1) 
-            for b in range(B)
-        ], dim=0) 
-        # Resulting shape: (B, C, T, H, W)
-
-        if is_single_sample:
-            return b_image_norm.squeeze(0) # Squeeze back to (C, T, H, W)
-        else:
-            return b_image_norm # Return (B, C, T, H, W)
-    
