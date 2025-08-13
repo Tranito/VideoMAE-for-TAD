@@ -95,19 +95,20 @@ class ImageNet1kDataModule(CustomLightningDataModule):
 
     def train_dataloader(self):
 
-        # # introduce weighted sampling to create a balanced trainset
-        # count = dict()
+        # introduce weighted sampling to create a balanced trainset
+        
         # count[0], count[1] = self.train_dataset._label_array.count(0), self.train_dataset._label_array.count(1)
-        # label_weights = {label: 1.0/count for label, count in count.items()}
-        # sample_weights = [label_weights[label] for label in self.train_dataset._label_array]
-        # generator = torch.Generator().manual_seed(42)
-        # weighted_sampler = WeightedRandomSampler(weights = sample_weights, num_samples=len(self.train_dataset._label_array), replacement=True, generator=generator)
-        # balanced_subset = Subset(self.train_dataset, list(weighted_sampler))
+        unique_labels, count_labels = np.unique(np.array(self.train_dataset._label_array), return_counts=True)
+        count = dict(zip(unique_labels, count_labels))
+        label_weights = {label: 1.0/count for label, count in count.items()}
+        sample_weights = [label_weights[label] for label in self.train_dataset._label_array]
+        weighted_sampler = WeightedRandomSampler(weights = sample_weights, num_samples=len(self.train_dataset._label_array), replacement=True)
+        balanced_subset = Subset(self.train_dataset, list(weighted_sampler))
 
-        sampler = DistributedSampler(self.train_dataset, shuffle=True, drop_last=True)
+        sampler = DistributedSampler(balanced_subset, shuffle=True, drop_last=True)
 
         return torch.utils.data.DataLoader(
-            self.train_dataset,
+            balanced_subset,
             drop_last=True,
             persistent_workers=True,
             num_workers=self.train_num_workers,
