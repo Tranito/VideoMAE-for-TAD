@@ -10,6 +10,7 @@ import zipfile
 from collections import defaultdict
 import concurrent.futures
 import torch
+from collections import defaultdict
 
 import os
 def visualize_predictions_with_clip_and_anomaly(
@@ -69,7 +70,7 @@ def visualize_predictions_with_clip_and_anomaly(
     print(f"clip_keys: {clip_keys}, type: {type(clip_keys)}")
 
     if isinstance(clip_keys, tuple):
-        filename = f"{dataset}_{phase}_{clip_names.split("/")[0]}_{clip_names.split("/")[1]}.mp4"
+        filename = f"{dataset}_{phase}_{clip_names.split("/")[0]}_{clip_names.split("/")[1]}_sorted.mp4"
     else:
         filename = f"{dataset}_{phase}_{clip_names}_sorted.mp4"
 
@@ -100,20 +101,20 @@ def visualize_predictions_with_clip_and_anomaly(
         ax.plot(predictions, label='Prediction', color='blue')
         if isinstance(clip_keys, tuple):
             ax.plot(ground_truth, label='Ground Truth', color='green')
-            if (clip_keys[1]-46) > 0:    
-                ax.axvline(x=(clip_keys[1]-46), label='Time of Accident Frame', color='red')
+            if (clip_keys[1]-45) > 0:    
+                ax.axvline(x=(clip_keys[1]), label='Time of Accident Frame', color='red')
         else:
             ax.plot(ground_truth, label='Ground Truth', color='green')
 
-        xticks = np.arange(0, num_frames, step=20)
+        # xticks = np.arange(0, num_frames, step=20)
         
-        if dataset == "dota":
-            xticklabels = xticks + 15
-        else:
-            xticklabels = xticks + 46
+        # if dataset == "dota":
+        #     xticklabels = xticks + 15
+        # else:
+        #     xticklabels = xticks + 46
 
-        ax.set_xticks(xticks)
-        ax.set_xticklabels(xticklabels)
+        # ax.set_xticks(xticks)
+        # ax.set_xticklabels(xticklabels)
 
         ax.axvline(x=i, color='black', linewidth=2, label='Current Frame')
         ax.set_xlim(0, num_frames)
@@ -230,9 +231,11 @@ def read_annotations_dada(data_path, multi_class=False, mode="train"):
             with zipfile.ZipFile(os.path.join(data_path, "frames", clip, "images.zip"), 'r') as zipf:
                 framenames = natsorted([f for f in zipf.namelist() if os.path.splitext(f)[1]==video_ext])
             timesteps = natsorted([int(os.path.splitext(f)[0].split("_")[-1]) for f in framenames])
+            
             if_acc_video = int(row["whether an accident occurred (1/0)"])
             st = int(row["abnormal start frame"])
             en = int(row["abnormal end frame"])
+            toa = int(row["accident frame"])
 
             if multi_class:
                 if if_ego:
@@ -277,7 +280,9 @@ def process_clip(clip_key, preds_grouped, labels_grouped, clip_names, clip_times
         clip_id = clip_key
     clip_name = clip_names[clip_id]
     print(f"clip name: {clip_name}, clip_id: {clip_id}, clip_key: {clip_key}")
-    timesteps = [i for i in range(15, len(clip_timesteps[clip_id]))] if dataset == "dota" else [i for i in range(45, len(clip_timesteps[clip_id]))]
+
+    start_idx = 15 if dataset == "dota" else 45
+    timesteps = [i for i in range(1, len(clip_timesteps[clip_id])+1)] 
 
     if dataset == "dota":
         filenames = [f"{str(ts).zfill(6)}.jpg" for ts in timesteps]
@@ -293,8 +298,14 @@ def process_clip(clip_key, preds_grouped, labels_grouped, clip_names, clip_times
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.uint8)
                 images.append(img)
 
-    predictions = np.array(preds_grouped[clip_key])
-    ground_truth = np.array(labels_grouped[clip_key])
+    preds_cat = np.concatenate((np.array([np.nan for _ in range(start_idx-1)]), preds_grouped[clip_key]))
+    # testing 5 1s bins of 30 frames -> label bin 5 starts at frame 30
+    ground_truth_cat = np.concatenate((np.array([0 for _ in range(start_idx-1)]), labels_grouped[clip_key]))
+
+    predictions = preds_cat
+    ground_truth = ground_truth_cat
+
+
     visualize_predictions_with_clip_and_anomaly(
         predictions,
         ground_truth,
@@ -311,7 +322,6 @@ def process_clip(clip_key, preds_grouped, labels_grouped, clip_names, clip_times
 
 def create_and_visualize_videos(preds, labels, clip_infos, dataset="dota", output_path="/home/ltran/vmae_predictions", fps=30, phase="val", width=800, graph_height=400):
         
-    from collections import defaultdict
     preds_grouped = defaultdict(list)
     labels_grouped = defaultdict(list)
 
@@ -344,7 +354,7 @@ def create_and_visualize_videos(preds, labels, clip_infos, dataset="dota", outpu
                     process_clip,
                     clip_key, preds_grouped, labels_grouped,
                     clip_names, clip_timesteps,
-                    dataset, folder, phase, fps, width, graph_height
+                    dataset, folder, phase, fps, width, graph_height, output_path
                 )
             )
         # Optionally, wait for all to finish
