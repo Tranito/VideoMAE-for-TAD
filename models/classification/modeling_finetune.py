@@ -248,11 +248,6 @@ class VisionTransformer(nn.Module):
         num_patches = self.patch_embed.num_patches
         self.use_checkpoint = use_checkpoint
 
-        # uncomment when using token masking
-        # self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim), requires_grad=False)
-        # uncomment when using random masking
-        # self.token_masking = TokenMasking(self.mask_token)
-
         if use_flash_attn:
             print("Using Flash Attention!")
 
@@ -276,9 +271,8 @@ class VisionTransformer(nn.Module):
         self.norm = nn.Identity() if final_reduction == "fc_norm" else norm_layer(embed_dim)
         self.fc_norm = norm_layer(embed_dim) if final_reduction == "fc_norm" else None
         self.fc_dropout = nn.Dropout(p=fc_drop_rate) if fc_drop_rate > 0 else nn.Identity()
-        # self.linear = nn.Linear(embed_dim, embed_dim)
-        self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
+        self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
         if use_learnable_pos_emb:
             trunc_normal_(self.pos_embed, std=.02)
@@ -322,22 +316,6 @@ class VisionTransformer(nn.Module):
 
         masking_ratio = 0.0
 
-        # do token masking if training, else the same data is returned
-        # if masking_ratio > 0.0:
-        #     x = self.token_masking(x, masking_ratio)
-
-        # # old token masking
-        # if self.training:
-        #     tube_mask_gen = TubeMaskingGenerator((T//2, H // 16, W // 16), 0.4)
-        #     tube_mask = tube_mask_gen()
-
-        #     tube_mask = torch.from_numpy(tube_mask).to(x.device).bool()  # shape: [T * num_patches_per_frame]
-        #     tube_mask = tube_mask.unsqueeze(0).expand(B, -1)
-
-        #     # Apply mask
-        #     x = x.clone()
-        #     x[tube_mask] = self.mask_token.type_as(x)  # Masked tokens replaced by mask_token
-
         if self.pos_embed is not None:
             x = x + self.pos_embed.expand(B, -1, -1).type_as(x).to(x.device).clone().detach()
         x = self.pos_drop(x)
@@ -351,11 +329,6 @@ class VisionTransformer(nn.Module):
                 x = blk(x)
 
         x = self.norm(x)  # so features have stable and consistent distribution
-
-        # x = self.linear(x)
-        # x = self.fc_norm(x.mean(1))
-        # x = torch.nn.GELU()(x)
-        # return x
 
         if self.final_reduction == "fc_norm":
             return self.fc_norm(x.mean(1))

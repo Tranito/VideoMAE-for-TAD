@@ -33,19 +33,7 @@ class VITClassification(nn.Module):
         filtered_weights["head.weight"] = self.model.head.weight
         filtered_weights["head.bias"] = self.model.head.bias
 
-        # # uncomment when using token masking
-        # if hasattr(self.model, 'mask_token'):
-        #     filtered_weights["mask_token"] = self.model.mask_token
-
-        # if hasattr(self.model, "linear.weight") and hasattr(self.model, "linear.bias"):
-            # uncomment when using second training strategy
-            # the normalization layer receives different data in second training strategy
-        # filtered_weights["fc_norm.weight"] = self.model.fc_norm.weight
-        # filtered_weights["fc_norm.bias"] = self.model.fc_norm.bias
-        # filtered_weights["linear.weight"] = self.model.linear.weight
-        # filtered_weights["linear.bias"] = self.model.linear.bias
-
-        # path = "/home/ltran/VideoMAE-for-TAD/epoch=2-step=20000.ckpt"
+        # path = "/media/datasets_sveta/vitin1k/nlkptayb/checkpoints/epoch=1-step=20000.ckpt"
         # ckpt = torch.load(path, map_location="cpu")
         # filtered_weights = dict({k.replace("network.model.", ""): v for k, v in ckpt["state_dict"].items()})
         # filtered_weights 
