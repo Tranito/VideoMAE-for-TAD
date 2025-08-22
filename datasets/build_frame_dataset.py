@@ -65,10 +65,6 @@ def build_frame_dataset(is_train, test_mode, args):
             crop_size=args.input_size,
             short_side_size=args.short_side_size,
             args=args)
-        if args.multi_class is True:
-            nb_classes = 3
-        else:
-            nb_classes = 2
 
     elif args.data_set.startswith('DADA2K'):
         mode = None
@@ -76,15 +72,15 @@ def build_frame_dataset(is_train, test_mode, args):
         orig_fps = 30
         if is_train is True:
             mode = 'train'
-            anno_path = 'DADA2K_my_split/half_training.txt' if "_half" in args.data_set else "DADA2K_my_split/training.txt"
+            anno_path = 'DADA2K_my_split/half_training.txt' if "_half" in args.data_set else "DADA2K_my_split/new_training.txt"
             sampling_rate = args.sampling_rate
         elif test_mode is True:
             mode = 'test'
-            anno_path = "DADA2K_my_split/validation.txt"
+            anno_path = "DADA2K_my_split/new_validation.txt"
             sampling_rate = args.sampling_rate_val if args.sampling_rate_val > 0 else args.sampling_rate
         else:
             mode = 'validation'
-            anno_path = "DADA2K_my_split/validation.txt"
+            anno_path = "DADA2K_my_split/new_validation.txt"
             sampling_rate = args.sampling_rate_val if args.sampling_rate_val > 0 else args.sampling_rate
 
         dataset = FrameClsDataset_DADA(
@@ -103,14 +99,9 @@ def build_frame_dataset(is_train, test_mode, args):
             crop_size=args.input_size,
             short_side_size=args.short_side_size,
             args=args)
-        if args.multi_class is True:
-            nb_classes = 3
-        else:
-            nb_classes = 2
 
     else:
         raise NotImplementedError()
-    assert nb_classes == args.nb_classes
     print("Number of the class = %d" % np.unique(np.array(dataset.label_array)).shape[0])
 
-    return dataset, nb_classes
+    return dataset, None

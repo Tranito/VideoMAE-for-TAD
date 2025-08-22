@@ -53,7 +53,7 @@ class FrameClsDataset_DADA(Dataset):
         self.args = args
         self.aug = False
         self.rand_erase = False
-        self.multi_class = args.multi_class
+        self.regression = args.regression
         if self.mode in ['train']:
             self.aug = True
             if self.args.reprob > 0:
@@ -72,10 +72,8 @@ class FrameClsDataset_DADA(Dataset):
         else:
             self.label_array = self._label_array
 
-        # count_safe = self._label_array.count(0)
-        # count_risk = self._label_array.count(1)
-        # print(f"\n\n===\n[{mode}] | COUNT safe: {count_safe}\nCOUNT risk: {count_risk}\n===")
-        print(np.unique(np.array(self._label_array), return_counts=True))
+        if not self.regression:
+            print(np.unique(np.array(self._label_array), return_counts=True))
 
 
         if (mode == 'train'):
@@ -111,11 +109,10 @@ class FrameClsDataset_DADA(Dataset):
         clip_ego = []
         clip_night = []
         clip_toa = []
-        clip_ttc = []
         clip_acc = []
         clip_smoothed_labels = []
         clip_descriptions = []
-        clip_smoothed_labels_new = []
+        clip_ttc_new = []
 
 
         errors = []
@@ -149,42 +146,41 @@ class FrameClsDataset_DADA(Dataset):
             else:
                 binary_labels = [0 for t in timesteps]
             cat_labels = [l*int(clip_type) for l in binary_labels]
-            
             new_labels = []
             if toa > -1:
-                for t in range(len(timesteps)):
-                    if (t < toa - 150) or (t > en):
-                        new_labels.append(0)
-                    elif toa <= t <= en:
-                        new_labels.append(-1)
-                    elif toa -150 <= t <= toa-121:
-                        new_labels.append(5)
-                    elif toa -120 <= t <= toa-91:
-                        new_labels.append(4)
-                    elif toa -90 <= t <= toa-61:
-                        new_labels.append(3)
-                    elif toa -60 <= t <= toa-31:
-                        new_labels.append(2)
-                    elif toa -30 <= t <= toa-1:
-                        new_labels.append(1)
+                if self.regression:
+                    
+                        ttc_new = [t/30 for t in range(1, len(timesteps)+1)][::-1]
+                        all_smoothed_labels = None
+                else:
+                    
+                    for t in range(len(timesteps)):
+                        if (t < toa - 150) or (t > en):
+                            new_labels.append(0)
+                        elif toa <= t <= en:
+                            new_labels.append(-1)
+                        elif toa -150 <= t <= toa-121:
+                            new_labels.append(5)
+                        elif toa -120 <= t <= toa-91:
+                            new_labels.append(4)
+                        elif toa -90 <= t <= toa-61:
+                            new_labels.append(3)
+                        elif toa -60 <= t <= toa-31:
+                            new_labels.append(2)
+                        elif toa -30 <= t <= toa-1:
+                            new_labels.append(1)
 
-                bin_centers = np.array([0.5, 1.5, 2.5, 3.5, 4.5])
-                upper_range_ttc = 151 if toa - 150 > 0 else toa+1
-                ttc_gts = np.array([i/30 for i in range(1, upper_range_ttc)])
-                labels = [np.concatenate(([0], self.soft_ttc_label(ttc_gt, bin_centers, sigma=0.2))).tolist() for ttc_gt in ttc_gts]
-                labels.reverse()
-                all_smoothed_labels = [[1., 0., 0., 0., 0., 0.] for _ in range(0, toa-150)] + labels
-                    
-                binary_labels = new_labels
-                    
+                    binary_labels = new_labels
+
+                    bin_centers = np.array([0.5, 1.5, 2.5, 3.5, 4.5])
+                    upper_range_ttc = 151 if toa - 150 > 0 else toa+1
+                    ttc_gts = np.array([i/30 for i in range(1, upper_range_ttc)])
+                    labels = [np.concatenate(([0], self.soft_ttc_label(ttc_gt, bin_centers, sigma=0.2))).tolist() for ttc_gt in ttc_gts]
+                    labels.reverse()
+                    all_smoothed_labels = [[1., 0., 0., 0., 0., 0.] for _ in range(0, toa-150)] + labels
+                                            
             if_ego = clip_type in self.ego_categories
             if_night = int(row["light(day,night)1-2"]) == 2
-
-
-
-            ttc = compute_time_vector(binary_labels, fps=self.orig_fps, TT=self.ttc_TT, TA=self.ttc_TA)
-            smoothed_labels = smooth_labels(labels=torch.Tensor(binary_labels), time_vector=ttc,
-                                            before_limit=self.ttc_TT, after_limit=self.ttc_TA)
 
             # description_csv = description_csv.iloc[0].replace("\xa0"," ").strip().lstrip("[CLS]").rstrip("[SEP]")
             
@@ -196,11 +192,9 @@ class FrameClsDataset_DADA(Dataset):
             clip_ego.append(if_ego)
             clip_night.append(if_night)
             clip_toa.append(toa)
-            clip_ttc.append(ttc)
             clip_acc.append(if_acc_video)
-            clip_smoothed_labels.append(smoothed_labels)
-
-            clip_smoothed_labels_new.append(all_smoothed_labels)
+            clip_smoothed_labels.append(all_smoothed_labels)
+            clip_ttc_new.append(ttc_new) if self.regression else clip_ttc_new.append([])
 
         for line in errors:
             print(line)
@@ -219,17 +213,16 @@ class FrameClsDataset_DADA(Dataset):
         self.clip_ego = [clip_ego[i] for i in valid_idx]
         self.clip_night = [clip_night[i] for i in valid_idx]
         self.clip_toa = [clip_toa[i] for i in valid_idx]
-        self.clip_ttc = [clip_ttc[i] for i in valid_idx]
-        self.clip_smoothed_labels = [clip_smoothed_labels[i] for i in valid_idx]
-        self.clip_smoothed_labels_new = [clip_smoothed_labels_new[i] for i in valid_idx]
+        self.clip_smoothed_labels = [clip_smoothed_labels[i] for i in valid_idx] if not self.regression else None
+        self.clip_ttc_new = [clip_ttc_new[i] for i in valid_idx] if self.regression else None
         # self.clip_descriptions = clip_descriptions
 
     def _prepare_views(self):
         dataset_sequences = []
         label_array = []
-        ttc = []
         smoothed_label_array = []
-        smoothed_label_array_new = []
+        ttc_new = []
+
         sequencer = RegularSequencer(seq_frequency=self.target_fps, seq_length=self.view_len, step=self.view_step)
         N = len(self.clip_names)
         for i in tqdm(range(N), desc="Part 2/2. Preparing views"):
@@ -239,15 +232,19 @@ class FrameClsDataset_DADA(Dataset):
                 continue
             dataset_sequences.extend([(i, seq) for seq in sequences])
             label_array.extend([self.clip_bin_labels[i][seq[-1]] for seq in sequences])
-            smoothed_label_array.extend([self.clip_smoothed_labels[i][seq[-1]] for seq in sequences])
-            ttc.extend([self.clip_ttc[i][seq[-1]] for seq in sequences])
-            smoothed_label_array_new.extend([self.clip_smoothed_labels_new[i][seq[-1]] for seq in sequences])
+
+            if self.regression:
+                ttc_new.extend([self.clip_ttc_new[i][seq[-1]] for seq in sequences])
+                smoothed_label_array.extend([])
+            else:
+                ttc_new.extend([])
+                # print(f"{len(self.clip_smoothed_labels[i])},i: {i}")
+                smoothed_label_array.extend([self.clip_smoothed_labels[i][seq[-1]] for seq in sequences])
 
         self.dataset_samples = dataset_sequences
         self._label_array = label_array
-        self.ttc = ttc
+        self.sample_ttc_new = ttc_new
         self._smoothed_label_array = smoothed_label_array
-        self.sample_smoothed_labels_new = smoothed_label_array_new
 
     def __getitem__(self, index):
         if self.mode == 'train':
@@ -264,17 +261,15 @@ class FrameClsDataset_DADA(Dataset):
             if args.num_sample > 1:
                 frame_list = []
                 label_list = []
-                smoothed_label_list = []
+                # smoothed_label_list = []
                 index_list = []
-                ttc_list = []
                 clipID_list = []
                 clip_toa_list = []
 
                 for _ in range(args.num_sample):
                     new_frames = self._aug_frame(buffer, args)
                     label = self.label_array[index]
-                    smoothed_label = self._smoothed_label_array[index]
-                    ttc = self.ttc[index]
+                    # smoothed_label = self._smoothed_label_array[index]
                     clipID = self.dataset_samples[index][0]
                     clip_toa = self.clip_toa[clipID]
 
@@ -282,22 +277,21 @@ class FrameClsDataset_DADA(Dataset):
                     clip_toa_list.append(clip_toa)
                     frame_list.append(new_frames)
                     label_list.append(label)
-                    smoothed_label_list.append(smoothed_label)
+                    # smoothed_label_list.append(smoothed_label)
                     index_list.append(index)
-                    ttc_list.append(ttc)
-                extra_info = [{"ttc": ttc_item, "smoothed_labels": slab_item} for ttc_item, slab_item in
-                              zip(ttc_list, smoothed_label_list)]
+
                 
                 
                 # clip_description = self.clip_descriptions[clipID]
-                return frame_list, label_list, index_list, extra_info, clipID_list, clip_toa_list#, clip_description
+                return frame_list, label_list, index_list, clipID_list, clip_toa_list#, clip_description
             else:
                 buffer = self._aug_frame(buffer, args)
-            extra_info = {"ttc": self.ttc[index], "smoothed_labels": self._smoothed_label_array[index]}
             clipID = self.dataset_samples[index][0]
             # clip_description = self.clip_descriptions[clipID]
-            smoothed_labels_new = self.sample_smoothed_labels_new[index]
-            return buffer, self.label_array[index], index, extra_info, clipID, self.clip_toa[clipID], smoothed_labels_new#, clip_description
+            sample_ttc_new = self.sample_ttc_new[index] if self.regression else []
+            smoothed_label = self._smoothed_label_array[index] if not self.regression else []
+
+            return buffer, self.label_array[index], index, clipID, self.clip_toa[clipID], sample_ttc_new, smoothed_label#, clip_description
 
         elif self.mode == 'validation':
             sample = self.dataset_samples[index]
@@ -311,10 +305,10 @@ class FrameClsDataset_DADA(Dataset):
             do_pad = video_transforms.pad_wide_clips(buffer[0].shape[0], buffer[0].shape[1], self.crop_size)
             buffer = [do_pad(img) for img in buffer]       
             buffer = self.data_transform(buffer)
-            extra_info = {"ttc": self.ttc[index], "smoothed_labels": self._smoothed_label_array[index]}
             clipID = self.dataset_samples[index][0]
             # clip_description = self.clip_descriptions[clipID]
-            return buffer, self.label_array[index], index, extra_info, clipID, self.clip_toa[clipID]#, clip_description
+            sample_ttc_new = self.sample_ttc_new[index] if self.regression else []
+            return buffer, self.label_array[index], index, clipID, self.clip_toa[clipID], sample_ttc_new#, clip_description
 
         elif self.mode == 'test':
             sample = self.test_dataset[index]
@@ -327,11 +321,10 @@ class FrameClsDataset_DADA(Dataset):
             do_pad = video_transforms.pad_wide_clips(buffer[0].shape[0], buffer[0].shape[1], self.crop_size)
             buffer = [do_pad(img) for img in buffer]
             buffer = self.data_transform(buffer)
-            extra_info = {"ttc": self.ttc[index], "clip": clip_name, "frame": frame_name,
-                          "smoothed_labels": self._smoothed_label_array[index]}
             clipID = self.dataset_samples[index][0]
             # clip_description = self.clip_descriptions[clipID]
-            return buffer, self.test_label_array[index], index, extra_info, clipID, self.clip_toa[clipID]#, clip_description
+            sample_ttc_new = self.sample_ttc_new[index] if self.regression else []
+            return buffer, self.test_label_array[index], index, clipID, self.clip_toa[clipID], sample_ttc_new#, clip_description
         else:
             raise NameError('mode {} unkown'.format(self.mode))
 
