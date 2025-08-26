@@ -26,7 +26,7 @@ import wandb
 from PIL import Image
 import io
 
-class Classification(lightning.LightningModule):
+class Regression(lightning.LightningModule):
     def __init__(
             self,
             batch_size: int,
@@ -40,8 +40,6 @@ class Classification(lightning.LightningModule):
             weight_decay: float = 0.05,
             ignore_index: int = 255,
             lr_mode: str = "warmuplinear",
-            multi_class: bool = False,
-
     ):
         super().__init__()
         self.job_id = os.environ.get('SLURM_JOB_ID')
@@ -56,18 +54,11 @@ class Classification(lightning.LightningModule):
         self.warmup_iters = warmup_iters
         self.lr_mode = lr_mode
         self.save_hyperparameters()
-        self.multi_class = multi_class
 
         self.network = network
 
         # self.label2name = get_label2name()
         self.val_ds_names = ["val"]
-        self.metrics = nn.ModuleList(
-            [
-                MulticlassAccuracy(num_classes=self.network.num_classes, average="micro")
-                for _ in range(len(self.val_ds_names))
-            ]
-        )
 
         self.automatic_optimization = False
 
@@ -99,6 +90,7 @@ class Classification(lightning.LightningModule):
         self.all_labels = []
         self.clip_infos = []
         self.sample_idx = []
+        self.all_log_variances = []
 
     def get_optimizers(self):
         opt = self.optimizers()
@@ -111,14 +103,23 @@ class Classification(lightning.LightningModule):
             batch_idx: int,
     ):
         opt = self.get_optimizers()
-        b_image, b_target, b_smooth_target = batch[0], batch[1], batch[-1]
+        b_image, b_target = batch[0], batch[-2]
         # b_image = (B, C, T, H, W)
+        mean_ttc, log_variance = self.network(b_image)
+        mean_ttc = mean_ttc.squeeze(-1)
+        log_variance = log_variance.squeeze(-1)
 
-        source_logits = self.network(b_image)
+        # if self.global_step < 7000:
+        #     s = log_variance.clamp(min=-2.0, max=0.0)
+        # else:
+        #     s = log_variance.clamp(min=-4.0, max=2.0)
 
-        b_smooth_target = torch.stack(b_smooth_target).T        
+        s = log_variance
 
-        loss_source = F.cross_entropy(source_logits, b_smooth_target)
+        # ttc_mask = b_target < 5.0
+        # error = torch.where(ttc_mask, b_target - mean_ttc, F.relu(5.0 - mean_ttc))
+        error = b_target - mean_ttc
+        loss_source = torch.mean((error**2 / (2 * (s.exp() + 1e-8))) + 0.5 * s)
 
         self.manual_backward(loss_source)
         opt.step()
@@ -127,10 +128,8 @@ class Classification(lightning.LightningModule):
 
         with torch.no_grad():
             if (self.global_step % 10) == 0:
-                sourceds_predicted_segmentation = torch.argmax(source_logits.detach(), dim=1)
-                acc_source = (sourceds_predicted_segmentation == b_target)
-                acc_source = acc_source.float().mean()
-                self.log("acc", acc_source, prog_bar=False)
+                mae = torch.mean(torch.abs(mean_ttc.cpu() - b_target.cpu()))
+                self.log(f"mae", mae, prog_bar=True)
 
             if (self.global_step % 100) == 0:
                 self._log_img(b_image[0], "train")
@@ -142,29 +141,32 @@ class Classification(lightning.LightningModule):
             dataloader_idx: int,
             log_prefix: str,
     ):
-        b_image, b_target, sample_idx = batch[0], batch[1], batch[2]
-
+        b_image, b_target, sample_idx = batch[0], batch[-2], batch[2]
         self.clip_infos.extend(zip(batch[3], batch[4]))
         
         with torch.no_grad():
-            b_pred = self.network(b_image)
-            
-            self.all_preds.append(b_pred)
-            self.all_labels.append(b_target)
-            self.sample_idx.append(sample_idx)
+            mean_ttc, log_variance = self.network(b_image)
+            mean_ttc = mean_ttc.squeeze(-1)
+            log_variance = log_variance.squeeze(-1)
 
-            loss_source = F.cross_entropy(b_pred, b_target)
+            s = log_variance#.clamp(min=-6.0, max=6.0)
+            
+            self.all_preds.append(mean_ttc)
+            self.all_labels.append(b_target) 
+            self.sample_idx.append(sample_idx)
+            self.all_log_variances.append(s)
+
+            # ttc_mask = b_target < 5.0
+            # error = torch.where(ttc_mask, b_target - mean_ttc, F.relu(5.0 - mean_ttc))
+            loss_source = torch.mean(((b_target - mean_ttc)**2 / (2 * (s.exp() + 1e-8))) + 0.5 * s)
+
             self.log(f"{log_prefix}_loss", loss_source, prog_bar=True, sync_dist=True)
 
             if (batch_idx % 100) == 0:
-                # only send first batch
                 self._log_img(b_image[0], log_prefix) 
 
-            b_pred_valid = b_pred.argmax(dim=1)
-            b_target_valid = b_target
-            self.metrics[dataloader_idx].update(
-                b_pred_valid, b_target_valid
-            )
+            mae = torch.mean(torch.abs(mean_ttc.cpu() - b_target.cpu()))
+            self.log(f"{log_prefix}_mae", mae, prog_bar=True)
 
     @torch.no_grad()
     def _log_img(
@@ -221,13 +223,7 @@ class Classification(lightning.LightningModule):
         return self.eval_step(batch, batch_idx, dataloader_idx, "test")
 
     def _on_eval_epoch_end(self, log_prefix):
-        for metric_idx, metric in enumerate(self.metrics):
-            acc = metric.compute()
-            metric.reset()
-            ds_name = self.val_ds_names[metric_idx]
-            self.log(
-                f"{log_prefix}_{ds_name}_acc", acc, sync_dist=True
-            )
+        
         
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
@@ -236,112 +232,50 @@ class Classification(lightning.LightningModule):
         self.all_preds = torch.cat(self.all_preds, dim=0).type(torch.float16) if self.all_preds[0].dtype == torch.int64 else torch.cat(self.all_preds, dim=0)
         self.all_labels = torch.cat(self.all_labels, dim=0)
         self.clip_infos = torch.tensor(self.clip_infos) if type(self.clip_infos[0]) == tuple else torch.cat(self.clip_infos)
-        self.sample_idx = torch.cat(self.sample_idx)
-        
-        acc_whole_dataset, f1, auc_roc, ap, confmat = metrics(self.all_preds, self.all_labels, do_softmax=True, num_classes=self.network.num_classes)
-        more_metrics_to_log = [
-            ("f1", f1),
-            ("auc_roc", auc_roc),
-            ("ap", ap),
-        ]
-            
-        for name, value in more_metrics_to_log:
-            self.log(
-                f"{log_prefix}_{ds_name}_{name}", value, sync_dist=True
-            )
-        
+        self.sample_idx = torch.cat(self.sample_idx, dim=0)
+        self.all_log_variances = torch.cat(self.all_log_variances, dim=0)
+
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
             
         # Gather data from all processes
         self.all_preds = self.all_gather(self.all_preds)
-        self.all_preds = self.all_preds.reshape(-1, *self.all_preds.shape[2:])
-        self.all_labels = self.all_gather(self.all_labels).reshape(-1, *self.all_labels.shape[2:])
+        self.all_preds = self.all_preds.reshape(-1)
+        self.all_labels = self.all_gather(self.all_labels).reshape(-1)
         self.clip_infos = self.all_gather(self.clip_infos)
         self.clip_infos = self.clip_infos.reshape(-1, 2) if self.clip_infos.ndim > 2 else self.clip_infos.reshape(-1, *self.clip_infos.shape[2:])
         self.sample_idx = self.all_gather(self.sample_idx).reshape(-1) 
+        self.all_log_variances = self.all_gather(self.all_log_variances).reshape(-1)
         
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
-        # sort preds, labels, clip_infos
-        # this to preserve the order in each clip for calculating TTA and accuracy per frame distance w.r.t. start anomaly window/time of accident frame
+        # sort preds and labels such their order for each clip is preserved for visualization
         sorted_indices = self.sample_idx.argsort()    
         self.all_preds, self.all_labels, self.clip_infos = self.all_preds[sorted_indices], self.all_labels[sorted_indices], self.clip_infos[sorted_indices]
+        self.all_log_variances = self.all_log_variances[sorted_indices]
+
         
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
         if self.global_rank == 0:
             
-            accuracy_per_label, _ = prediction_lead_time(self.all_preds.cpu(), self.all_labels.cpu())
-            self.create_bar_chart(accuracy_per_label, log_prefix, ds_name)
-            # self.log("prediction lead time", pred_lead_time, sync_dist=False)
-
-            self.create_confusion_matrix_plot(self.all_preds.cpu(), self.all_labels.cpu(), log_prefix, ds_name)
-
+            # save all data from last validation for visualization
             if self.global_step > 19000:
-                with open("data_new_split_smooth_lbl_5_1s_balanced_lyr_decay_0_6_sigma_0_3.pkl", "wb") as f:
+                with open("data_regre_only_region_A_no_var_clipping.pkl", "wb") as f:
                     pickle.dump({
                         "all_preds": self.all_preds.cpu(),
                         "all_labels": self.all_labels.cpu(),
                         "clip_infos": self.clip_infos.cpu(),
                         "sample_idx": self.sample_idx.cpu(),
+                        "all_log_variances": self.all_log_variances.cpu(),
                     }, f)
 
-        # Final synchronization before clearing data
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
-        self.all_preds, self.all_labels, self.clip_infos, self.sample_idx = [], [], [], []
-
-    def create_confusion_matrix_plot(self, preds, labels, log_prefix, ds_name):
-        predicted_classes = preds.argmax(dim=1).cpu().numpy()
-        true_labels = labels.cpu().numpy()
-        unique_classes = np.unique(np.concatenate([true_labels, predicted_classes]))
-        
-        cm = confusion_matrix(true_labels, predicted_classes, labels=unique_classes)
-        class_names = [str(i) for i in unique_classes]
-        
-        fig, ax = plt.subplots(figsize=(max(8, len(unique_classes)*2), max(6, len(unique_classes)*1.5)))
-        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
-        disp.plot(ax=ax, cmap='Blues', values_format='d')
-        
-        plt.title(f'Confusion Matrix - {ds_name}')
-        plt.tight_layout()
-        
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.1, dpi=150)
-        plt.close(fig)
-        buf.seek(0)
-        PIL_image = Image.open(buf).convert('RGB')
-        
-        self.trainer.logger.experiment.log({
-            f"{log_prefix}_{ds_name}_confusion_matrix": wandb.Image(PIL_image, caption=f"Confusion Matrix - {ds_name}")
-        })
-
-    def create_bar_chart(self, accuracy_per_label, log_prefix, ds_name):
-        fig, ax = plt.subplots(figsize=(5, 2.5))
-
-            # Create color array - orange for all bars except last one (grey + transparent)
-        colors = ['orange'] * (len(accuracy_per_label) - 1) + ['grey']
-        labels = [str(label) for label in range(0, len(accuracy_per_label))]
-        bars = plt.bar(labels[::-1], torch.flip(accuracy_per_label, dims=(0,)).numpy(), width=0.3, color=colors)
-        plt.ylabel("Mean accuracy [-]")
-        plt.xlabel("Labels (sec before collision)")
-        plt.title("Mean accuracy per Label")
-        plt.xticks(fontsize=10, rotation=90)
-        plt.tight_layout()
-        plt.grid()
-        plt.axhline(0.5, color="green", linestyle="--")
-        plt.yticks([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
-        plt.xticks(labels, ["normal"] + [str(1 + i*1) + "s" for i in range(len(labels)-1)], fontsize=10, rotation=90)
-        # ax.margins(x=-0.02)
-        for bar in bars:
-            yval = bar.get_height()
-            plt.text(bar.get_x(), yval + .005, f"{yval:.3f}", size=8)
-        print(f"Mean accuracy per label (from label {len(accuracy_per_label)-1} to label 0): {torch.flip(accuracy_per_label, dims=(0,)).numpy()}")
-        self.trainer.logger.experiment.log({f"{log_prefix}_{ds_name}_mean_acc_per_label": wandb.Image(fig, caption="Mean Accuracy per label")})
+        self.all_preds, self.all_labels, self.clip_infos, self.sample_idx, self.all_log_variances = [], [], [], [], []
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end("val")
@@ -355,6 +289,7 @@ class Classification(lightning.LightningModule):
 
     def configure_optimizers(self):
         
+        # # apply layerwise decay
         assigner = LayerDecayValueAssigner(list(self.layerwise_lr_decay ** (self.network.model.get_num_layers() + 1 - i) for i in range(self.network.model.get_num_layers() + 2)))
         optim_weights = get_parameter_groups(self.network.model, weight_decay=self.weight_decay,
             get_num_layer=assigner.get_layer_id, get_layer_scale=assigner.get_scale, lr = self.lr)

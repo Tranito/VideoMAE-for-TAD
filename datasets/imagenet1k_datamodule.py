@@ -27,7 +27,7 @@ class ImageNet1kDataModule(CustomLightningDataModule):
             sampling_rate: int = 1,
             sampling_rate_val: int = 1,
             view_fps: int = 10,
-            multi_class: bool = False,
+            regression: bool = False,
     ) -> None:
         super().__init__(
             root=root,
@@ -62,12 +62,11 @@ class ImageNet1kDataModule(CustomLightningDataModule):
         "sampling_rate_val": sampling_rate_val,
         "view_fps": view_fps,
         "data_set": "DoTA" if dataset == "dota" else "DADA2K",
-        "multi_class": multi_class,
+        "regression": regression,
 
         # Optimizer parameters
         "loss": "crossentropy",
         }
-        self.extra_args["nb_classes"] = 2 if self.extra_args["multi_class"] is False else 3
 
         self.val_num_workers = val_num_workers
         self.val_batch_size = val_batch_size
@@ -82,8 +81,6 @@ class ImageNet1kDataModule(CustomLightningDataModule):
 
         print(f"loading {self.extra_args['data_set']} dataset from {self.extra_args['data_path']}")
         print(f"num_frames per window: {self.extra_args['num_frames']}, sampling_rate: {self.extra_args['sampling_rate']}, sampling_rate_val: {self.extra_args['sampling_rate_val']}, target_fps: {self.extra_args['view_fps']}")
-        if self.extra_args["multi_class"]:
-            print("Using multi-class classification") 
 
         self.train_dataset, _ = build_frame_dataset(is_train=True, test_mode=False, args=self.extra_args)
         self.val_dataset, _ = build_frame_dataset(is_train=False, test_mode=False, args=self.extra_args)
@@ -97,18 +94,17 @@ class ImageNet1kDataModule(CustomLightningDataModule):
 
         # introduce weighted sampling to create a balanced trainset
         
-        # count[0], count[1] = self.train_dataset._label_array.count(0), self.train_dataset._label_array.count(1)
-        unique_labels, count_labels = np.unique(np.array(self.train_dataset._label_array), return_counts=True)
-        count = dict(zip(unique_labels, count_labels))
-        label_weights = {label: 1.0/count for label, count in count.items()}
-        sample_weights = [label_weights[label] for label in self.train_dataset._label_array]
-        weighted_sampler = WeightedRandomSampler(weights = sample_weights, num_samples=len(self.train_dataset._label_array), replacement=True)
-        balanced_subset = Subset(self.train_dataset, list(weighted_sampler))
+        # unique_labels, count_labels = np.unique(np.array(self.train_dataset._label_array), return_counts=True)
+        # count = dict(zip(unique_labels, count_labels))
+        # label_weights = {label: 1.0/count for label, count in count.items()}
+        # sample_weights = [label_weights[label] for label in self.train_dataset._label_array]
+        # weighted_sampler = WeightedRandomSampler(weights = sample_weights, num_samples=len(self.train_dataset._label_array), replacement=True)
+        # balanced_subset = Subset(self.train_dataset, list(weighted_sampler))
 
-        sampler = DistributedSampler(balanced_subset, shuffle=True, drop_last=True)
+        sampler = DistributedSampler(self.train_dataset, shuffle=True, drop_last=True)
 
         return torch.utils.data.DataLoader(
-            balanced_subset,
+            self.train_dataset,
             drop_last=True,
             persistent_workers=True,
             num_workers=self.train_num_workers,
