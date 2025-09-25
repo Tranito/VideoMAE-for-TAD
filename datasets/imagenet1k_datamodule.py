@@ -94,17 +94,43 @@ class ImageNet1kDataModule(CustomLightningDataModule):
 
         # introduce weighted sampling to create a balanced trainset
         
-        # unique_labels, count_labels = np.unique(np.array(self.train_dataset._label_array), return_counts=True)
-        # count = dict(zip(unique_labels, count_labels))
-        # label_weights = {label: 1.0/count for label, count in count.items()}
-        # sample_weights = [label_weights[label] for label in self.train_dataset._label_array]
-        # weighted_sampler = WeightedRandomSampler(weights = sample_weights, num_samples=len(self.train_dataset._label_array), replacement=True)
-        # balanced_subset = Subset(self.train_dataset, list(weighted_sampler))
+        unique_labels, count_labels = np.unique(np.array(self.train_dataset._new_binary_label), return_counts=True)
+        count = dict(zip(unique_labels, count_labels))
+        label_weights = {label: 1.0/count for label, count in count.items()}
+        sample_weights = [label_weights[label] for label in self.train_dataset._new_binary_label]
 
-        sampler = DistributedSampler(self.train_dataset, shuffle=True, drop_last=True)
-
+        # Custom dataset that generates new balanced indices each epoch
+        class DynamicallyBalancedDataset(torch.utils.data.Dataset):
+            def __init__(self, base_dataset, weights):
+                self.base_dataset = base_dataset
+                self.weights = torch.tensor(weights, dtype=torch.double)
+                self.indices = self._generate_indices()
+                
+            def _generate_indices(self):
+                sampler = WeightedRandomSampler(
+                    self.weights, 
+                    num_samples=len(self.base_dataset), 
+                    replacement=True
+                )
+                return list(sampler)
+                
+            def __len__(self):
+                return len(self.indices)
+                
+            def __getitem__(self, idx):
+                actual_idx = self.indices[idx]
+                return self.base_dataset[actual_idx]
+                
+            def set_epoch(self, epoch):
+                # Generate NEW balanced indices each epoch
+                torch.manual_seed(epoch + 42)  # Ensure reproducibility but different each epoch
+                self.indices = self._generate_indices()
+        
+        balanced_dataset = DynamicallyBalancedDataset(self.train_dataset, sample_weights)
+        sampler = DistributedSampler(balanced_dataset, shuffle=True, drop_last=True)
+        
         return torch.utils.data.DataLoader(
-            self.train_dataset,
+            balanced_dataset,
             drop_last=True,
             persistent_workers=True,
             num_workers=self.train_num_workers,

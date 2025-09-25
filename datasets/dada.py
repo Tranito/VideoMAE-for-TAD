@@ -104,7 +104,7 @@ class FrameClsDataset_DADA(Dataset):
 
     def _read_anno(self):
         clip_timesteps = []
-        clip_binary_labels = []
+        clip_bin_labels = []
         clip_cat_labels = []
         clip_ego = []
         clip_night = []
@@ -114,8 +114,10 @@ class FrameClsDataset_DADA(Dataset):
         clip_descriptions = []
         clip_ttc_new = []
 
-
         errors = []
+
+        # binary labels based on the new labelling scheme
+        clip_new_bin_labels = []
 
         with open(os.path.join(self.data_path, self.anno_path), 'r') as file:
             clip_names = [line.rstrip() for line in file]
@@ -146,23 +148,41 @@ class FrameClsDataset_DADA(Dataset):
             else:
                 binary_labels = [0 for t in timesteps]
             cat_labels = [l*int(clip_type) for l in binary_labels]
+
             new_labels = []
             if toa > -1:
                 if self.regression:
-                    
                         ttc_new = [t/30 for t in range(1, len(timesteps)+1)][::-1]
                         all_smoothed_labels = None
+
+                        for t in range(len(timesteps)):
+                            if (t < toa - 90) or (t > en):
+                                new_labels.append(0)
+                            elif toa <= t <= en:
+                                new_labels.append(-1)
+                            # elif toa -150 <= t <= toa-121:
+                            #     new_labels.append(5)
+                            # elif toa -120 <= t <= toa-91:
+                            #     new_labels.append(4)
+                            elif toa -90 <= t <= toa-61:
+                                new_labels.append(3)
+                            elif toa -60 <= t <= toa-31:
+                                new_labels.append(2)
+                            elif toa -30 <= t <= toa-1:
+                                new_labels.append(1)
+
+                        binary_labels = new_labels
                 else:
                     
                     for t in range(len(timesteps)):
-                        if (t < toa - 150) or (t > en):
+                        if (t < toa - 90) or (t > en):
                             new_labels.append(0)
                         elif toa <= t <= en:
                             new_labels.append(-1)
-                        elif toa -150 <= t <= toa-121:
-                            new_labels.append(5)
-                        elif toa -120 <= t <= toa-91:
-                            new_labels.append(4)
+                        # elif toa -150 <= t <= toa-121:
+                        #     new_labels.append(5)
+                        # elif toa -120 <= t <= toa-91:
+                        #     new_labels.append(4)
                         elif toa -90 <= t <= toa-61:
                             new_labels.append(3)
                         elif toa -60 <= t <= toa-31:
@@ -172,22 +192,28 @@ class FrameClsDataset_DADA(Dataset):
 
                     binary_labels = new_labels
 
-                    bin_centers = np.array([0.5, 1.5, 2.5, 3.5, 4.5])
-                    upper_range_ttc = 151 if toa - 150 > 0 else toa+1
+                    bin_centers = np.array([0.5, 1.5, 2.5])
+                    upper_range_ttc = 91 if toa - 90 > 0 else toa+1
                     ttc_gts = np.array([i/30 for i in range(1, upper_range_ttc)])
                     labels = [np.concatenate(([0], self.soft_ttc_label(ttc_gt, bin_centers, sigma=0.2))).tolist() for ttc_gt in ttc_gts]
                     labels.reverse()
-                    all_smoothed_labels = [[1., 0., 0., 0., 0., 0.] for _ in range(0, toa-150)] + labels
+                    all_smoothed_labels = [[1., 0., 0., 0.] for _ in range(0, toa-90)] + labels
+
+                if toa - 90 > 0:
+                    new_bin_labels = [0 for _ in range(0, toa-90)] + [1 for _ in range(90)]
+                    clip_new_bin_labels.append(new_bin_labels)
+                else:
+                    new_bin_labels = [1 for _ in range(toa)]
+                    clip_new_bin_labels.append(new_bin_labels)
                                             
             if_ego = clip_type in self.ego_categories
             if_night = int(row["light(day,night)1-2"]) == 2
 
             # description_csv = description_csv.iloc[0].replace("\xa0"," ").strip().lstrip("[CLS]").rstrip("[SEP]")
-            
             clip_descriptions.append(description_csv)
 
             clip_timesteps.append(timesteps)
-            clip_binary_labels.append(binary_labels)
+            clip_bin_labels.append(binary_labels)
             clip_cat_labels.append(cat_labels)
             clip_ego.append(if_ego)
             clip_night.append(if_night)
@@ -202,19 +228,24 @@ class FrameClsDataset_DADA(Dataset):
             print(f"\n====\nerrors: {len(errors)}. You can add saving the error list in the code.")
             exit(0)
 
-        assert len(clip_names) == len(clip_timesteps) == len(clip_binary_labels) == len(clip_cat_labels)
+        assert len(clip_names) == len(clip_timesteps) == len(clip_bin_labels) == len(clip_cat_labels)
+
+        print(f"len clip_new_bin_labels: {len(clip_new_bin_labels)}")
         
         clip_acc = np.array(clip_acc)
         valid_idx = np.where(clip_acc == 1)[0]
+        print(f"len valid_idx: {len(valid_idx)}")
         self.clip_names = [clip_names[i] for i in valid_idx]
         self.clip_timesteps = [clip_timesteps[i] for i in valid_idx]
-        self.clip_bin_labels = [clip_binary_labels[i] for i in valid_idx]
+        self.clip_bin_labels = [clip_bin_labels[i] for i in valid_idx]
         self.clip_cat_labels = [clip_cat_labels[i] for i in valid_idx]
         self.clip_ego = [clip_ego[i] for i in valid_idx]
         self.clip_night = [clip_night[i] for i in valid_idx]
         self.clip_toa = [clip_toa[i] for i in valid_idx]
+
         self.clip_smoothed_labels = [clip_smoothed_labels[i] for i in valid_idx] if not self.regression else None
         self.clip_ttc_new = [clip_ttc_new[i] for i in valid_idx] if self.regression else None
+        self.clip_new_bin_labels = [clip_new_bin_labels[i] for i in valid_idx]
         # self.clip_descriptions = clip_descriptions
 
     def _prepare_views(self):
@@ -222,6 +253,8 @@ class FrameClsDataset_DADA(Dataset):
         label_array = []
         smoothed_label_array = []
         ttc_new = []
+        #for new binary labels based on new labelling scheme
+        new_bin_label_array = []
 
         sequencer = RegularSequencer(seq_frequency=self.target_fps, seq_length=self.view_len, step=self.view_step)
         N = len(self.clip_names)
@@ -232,6 +265,8 @@ class FrameClsDataset_DADA(Dataset):
                 continue
             dataset_sequences.extend([(i, seq) for seq in sequences])
             label_array.extend([self.clip_bin_labels[i][seq[-1]] for seq in sequences])
+
+            new_bin_label_array.extend([self.clip_new_bin_labels[i][seq[-1]] for seq in sequences])
 
             if self.regression:
                 ttc_new.extend([self.clip_ttc_new[i][seq[-1]] for seq in sequences])
@@ -245,6 +280,10 @@ class FrameClsDataset_DADA(Dataset):
         self._label_array = label_array
         self.sample_ttc_new = ttc_new
         self._smoothed_label_array = smoothed_label_array
+        self._new_binary_label = new_bin_label_array
+
+        # for providing new labels based on new labelling scheme
+        # self._new_bin_label = new_label_array
 
     def __getitem__(self, index):
         if self.mode == 'train':
