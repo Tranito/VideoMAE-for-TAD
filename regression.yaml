@@ -3,7 +3,7 @@ trainer:
    class_path: lightning.pytorch.loggers.wandb.WandbLogger
    init_args:
      resume: allow
-     name: "[NEW SYSTEM] DADA lr=1e-5 b32, new split, regression, lyr decay 0.6, new heads, only region A"
+     name: "DADA lr=2e-5, newsplit, regre+class, ld0.7, all reg, simp heads, lrmin1e-8, alph3, new bin acc eval"
      project: "vitin1k"
   devices: 1
   num_nodes: 1
@@ -13,9 +13,10 @@ trainer:
 model:
   class_path: training.regression.Regression
   init_args:
-    lr: 1e-5
-    layerwise_lr_decay: 0.6
+    lr: 2e-5
+    layerwise_lr_decay: 0.7
     lr_mode: "cosine_annealing"
+    eta_min: 1e-8
     network:
       class_path: models.regression.vit_regression.VITRegression
       init_args:

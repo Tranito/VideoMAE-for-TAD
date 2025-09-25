@@ -41,6 +41,7 @@ class Classification(lightning.LightningModule):
             ignore_index: int = 255,
             lr_mode: str = "warmuplinear",
             multi_class: bool = False,
+            eta_min: float = 1e-6,
 
     ):
         super().__init__()
@@ -57,6 +58,9 @@ class Classification(lightning.LightningModule):
         self.lr_mode = lr_mode
         self.save_hyperparameters()
         self.multi_class = multi_class
+
+        self.eta_min = eta_min
+        print(f"eta_min: {self.eta_min}")
 
         self.network = network
 
@@ -118,7 +122,7 @@ class Classification(lightning.LightningModule):
 
         b_smooth_target = torch.stack(b_smooth_target).T        
 
-        loss_source = F.cross_entropy(source_logits, b_smooth_target)
+        loss_source = F.cross_entropy(source_logits, b_target)
 
         self.manual_backward(loss_source)
         opt.step()
@@ -281,7 +285,7 @@ class Classification(lightning.LightningModule):
             self.create_confusion_matrix_plot(self.all_preds.cpu(), self.all_labels.cpu(), log_prefix, ds_name)
 
             if self.global_step > 19000:
-                with open("data_new_split_smooth_lbl_5_1s_balanced_lyr_decay_0_6_sigma_0_3.pkl", "wb") as f:
+                with open(f"data_class_new_split_alpha3_bins_of_1s_new_lbl_balancing_lr2e-5_ld06_lr_min1e-8_corr_mdl_outputs.pkl", "wb") as f:
                     pickle.dump({
                         "all_preds": self.all_preds.cpu(),
                         "all_labels": self.all_labels.cpu(),
@@ -389,7 +393,7 @@ class Classification(lightning.LightningModule):
                 "scheduler": torch.optim.lr_scheduler.CosineAnnealingLR(
                     optimizer,
                     T_max=self.trainer.max_steps,
-                    eta_min=1e-6,
+                    eta_min=self.eta_min,
                 ),
                 "interval": "step",
             }

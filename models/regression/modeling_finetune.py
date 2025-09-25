@@ -6,8 +6,7 @@ import torch.nn.functional as F
 from timm.models.layers import drop_path, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 import torch.utils.checkpoint as checkpoint
-from models.classification.masking_generator import TubeMaskingGenerator
-from models.classification.token_masking import TokenMasking
+
 
 
 def _cfg(url='', **kwargs):
@@ -274,36 +273,10 @@ class VisionTransformer(nn.Module):
 
         # self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-        self.head1 = nn.Sequential(nn.Linear(embed_dim, embed_dim),
-                                   nn.LayerNorm(embed_dim),  
-                                   nn.GELU(),
-                                   nn.Dropout(0.2),
-                                   nn.Linear(embed_dim, 256),
-                                   nn.LayerNorm(256),        
-                                   nn.GELU(),
-                                   nn.Dropout(0.2),
-                                   nn.Linear(256, 1))
-        
-        self.head2 = nn.Sequential(nn.Linear(embed_dim, embed_dim),
-                                   nn.LayerNorm(embed_dim),  
-                                   nn.GELU(),
-                                   nn.Dropout(0.2),
-                                   nn.Linear(embed_dim, 256),
-                                   nn.LayerNorm(256),        
-                                   nn.GELU(),
-                                   nn.Dropout(0.2), 
-                                   nn.Linear(256, 1))
-
         if use_learnable_pos_emb:
             trunc_normal_(self.pos_embed, std=.02)
 
-        # if hasattr(self.head, "weight"):
-        #     trunc_normal_(self.head.weight, std=.02)
-        # self.apply(self._init_weights)
-
-        # if hasattr(self.head, "weight"):
-        #     self.head.weight.data.mul_(init_scale)
-        #     self.head.bias.data.mul_(init_scale)
+        self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -350,6 +323,7 @@ class VisionTransformer(nn.Module):
 
         x = self.norm(x)  # so features have stable and consistent distribution
 
+
         if self.final_reduction == "fc_norm":
             return self.fc_norm(x.mean(1))
         elif self.final_reduction == "cls":
@@ -359,5 +333,4 @@ class VisionTransformer(nn.Module):
 
     def forward(self, x):
         x = self.forward_features(x)
-        x1, x2 = self.head1(self.fc_dropout(x)), self.head2(self.fc_dropout(x))
-        return x1, x2
+        return x

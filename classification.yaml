@@ -3,7 +3,7 @@ trainer:
    class_path: lightning.pytorch.loggers.wandb.WandbLogger
    init_args:
      resume: allow
-     name: "DADA lr=1e-5 b32, new split, new lbls, lyr decay 0.6, 5 bins of 1s"
+     name: "DADA class lr=2e-5 b32, new split, new lbls, lyr decay 0.6, lrmin1e-8, alpha=5 bins of 1s, new lbl balancing, corr mdl output"
      project: "vitin1k"
   devices: 1
   num_nodes: 1
@@ -13,14 +13,15 @@ trainer:
 model:
   class_path: training.classification.Classification
   init_args:
-    lr: 1e-5
+    lr: 2e-5
     layerwise_lr_decay: 0.6
     lr_mode: "cosine_annealing"
+    eta_min: 1e-8
     network:
       class_path: models.classification.vit_classification.VITClassification
       init_args:
         model_name: VideoMAE V2 ViT Small K710
-        num_classes: 6
+        num_classes: 4
 data:
   class_path: datasets.imagenet1k_datamodule.ImageNet1kDataModule
   init_args:
@@ -28,7 +29,7 @@ data:
     batch_size: 32
     train_num_workers: 6  
 
-    val_batch_size: 32
+    val_batch_size: 64
     val_num_workers: 4
     
     img_size: 224
