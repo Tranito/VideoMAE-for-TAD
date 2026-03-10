@@ -1,70 +1,110 @@
 import torch
 from torch import optim as optim
-
 import json
 
-def get_num_layer_for_vit(var_name, num_max_layer):
-    if var_name in ("cls_token", "mask_token", "pos_embed"):
-        return 0
-    elif var_name.startswith("patch_embed"):
-        return 0
-    elif var_name.startswith("rel_pos_bias"):
-        return num_max_layer - 1
-    elif var_name.startswith("blocks"):
-        layer_id = int(var_name.split('.')[1])
-        return layer_id + 1
-    else:
-        return num_max_layer - 1
+def get_vit_parameter_groups(
+    model: torch.nn.Module,
+    base_lr: float = 2.5e-5,
+    weight_decay: float = 0.05,
+    layer_decay: float = 0.75,
+    head_lr_mult: float = 1.0,
+    skip_list: tuple = None,
+    verbose: bool = False,
+):
+    """
+    Build parameter groups for ViT with layer-wise learning rate decay.
+    
+    Args:
+        model: VisionTransformer instance
+        base_lr: Base learning rate for the highest layer
+        weight_decay: Weight decay for parameters not in skip_list
+        layer_decay: LR multiplier per layer (< 1.0). Earlier layers get smaller LR.
+        head_lr_mult: Extra multiplier for head parameters (typically 5-20 for random init)
+        skip_list: Parameter names to exclude from weight decay
+        verbose: Print parameter groups for debugging
+    
+    Returns:
+        List of parameter group dicts for optimizer
+    """
+    if skip_list is None:
+        skip_list = ()
+    
+    # Extend skip_list with model's no_weight_decay() if available
+    try:
+        model_no_wd = getattr(model, "no_weight_decay", None)
+        if callable(model_no_wd):
+            skip_set = set(skip_list) | set(model_no_wd())
+        else:
+            skip_set = set(skip_list)
+    except Exception:
+        skip_set = set(skip_list)
 
+    # Get number of transformer blocks
+    num_blocks = getattr(model, "get_num_layers", lambda: None)()
+    if num_blocks is None:
+        num_blocks = len(getattr(model, "blocks", []))
 
-class LayerDecayValueAssigner(object):
-    def __init__(self, values):
-        self.values = values
+    # Layer IDs: 0 (patch_embed), 1..num_blocks (blocks), num_blocks+1 (heads/fc_norm)
+    max_layer_id = num_blocks
+    head_layer_id = max_layer_id + 1
+    
+    # LR scales: earlier layers get decay**(max_layer_id - layer_id)
+    # Last block gets scale=1.0, patch_embed gets smallest scale
+    scales = [layer_decay ** (max_layer_id - i) for i in range(max_layer_id + 1)]
+    scales.append(1.0 * head_lr_mult)  # heads get extra multiplier
 
-    def get_scale(self, layer_id):
-        return self.values[layer_id]
+    def _get_layer_id(var_name: str) -> int:
+        if var_name.startswith("patch_embed") or var_name in ("cls_token", "mask_token", "pos_embed"):
+            return 0
+        elif var_name.startswith("blocks"):
+            try:
+                layer_index = int(var_name.split(".")[1])
+                return layer_index + 1
+            except Exception:
+                return max_layer_id
+        elif var_name.startswith("fc_norm") or var_name.startswith("rel_pos_bias"):
+            return max_layer_id
+        elif var_name.startswith("head"):
+            return head_layer_id
+        else:
+            return head_layer_id
 
-    def get_layer_id(self, var_name):
-        return get_num_layer_for_vit(var_name, len(self.values))
-
-
-def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_num_layer=None, get_layer_scale=None, lr=2.5e-5):
     parameter_group_names = {}
     parameter_group_vars = {}
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
-            continue  # frozen weights
-        if len(param.shape) == 1 or name.endswith(".bias") or name in skip_list:
-            group_name = "no_decay"
-            this_weight_decay = 0.
+            continue
+        
+        # Determine weight decay
+        if len(param.shape) == 1 or name.endswith(".bias") or name in skip_set:
+            decay_type = "no_decay"
+            this_wd = 0.0
         else:
-            group_name = "decay"
-            this_weight_decay = weight_decay
-        if get_num_layer is not None:
-            layer_id = get_num_layer(name)
-            group_name = "layer_%d_%s" % (layer_id, group_name)
-        else:
-            layer_id = None
+            decay_type = "decay"
+            this_wd = weight_decay
+
+        layer_id = _get_layer_id(name)
+        group_name = f"layer_{layer_id}_{decay_type}"
+        scale = scales[min(layer_id, len(scales) - 1)]
 
         if group_name not in parameter_group_names:
-            if get_layer_scale is not None:
-                    scale = get_layer_scale(layer_id)
-            else:
-                scale = 1.
-
+            lr = base_lr * float(scale)
             parameter_group_names[group_name] = {
-                "weight_decay": this_weight_decay,
+                "weight_decay": this_wd,
                 "params": [],
-                "lr": scale*lr
+                "lr": lr,
             }
             parameter_group_vars[group_name] = {
-                "weight_decay": this_weight_decay,
+                "weight_decay": this_wd,
                 "params": [],
-                "lr": scale*lr
+                "lr": lr,
             }
 
         parameter_group_vars[group_name]["params"].append(param)
         parameter_group_names[group_name]["params"].append(name)
-    print("Param groups = %s" % json.dumps(parameter_group_names, indent=2))
+
+    if verbose:
+        print("Param groups = %s" % json.dumps(parameter_group_names, indent=2))
+
     return list(parameter_group_vars.values())

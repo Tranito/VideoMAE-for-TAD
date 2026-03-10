@@ -1,82 +1,68 @@
 import numpy as np
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    confusion_matrix,
-    roc_auc_score,
-    average_precision_score,
-)
-
 import torch
 import torchmetrics
 from itertools import groupby
 from collections import defaultdict
-THRESHOLDS = np.arange(0.00, 1.001, 0.01).tolist()
 
+def accuracy_per_bin_regression(preds, clip_infos, alpha=5, bin_width=1, fps=30):
+    """
+    Computes per-bin accuracy for the regression model.
 
-def metrics(preds, labels, do_softmax=True, num_classes=2):
+    Unlike classification, regression cannot use PyTorch's MultiClassAccuracy,
+    because it outputs continuous TTC values rather than discrete bin logits.
+    Bin accuracy is defined as the fraction of TTC predictions that fall within the
+    ground-truth bin's TTC interval.
     
-    if do_softmax:
-        preds = torch.nn.functional.softmax(preds, dim=1)
+    Args:
+        preds (tensor): tensor of predicted TTC values
+        clip_infos (tensor): tensor of tuples (clip_id, toa) for each prediction
+        alpha (int): the threshold for separating No Collision Soon and Collision Soon region
+        bin_width (float): the width of each bin in seconds
+        fps (int): frames per second of the video
 
-    values = preds
-    task = "multiclass"
-    average = "macro"
-    num_classes = num_classes
-    
-    _, preds = torch.max(preds, 1)
+    Returns:
+        mean_accuracy_per_bin: dict mapping bin labels to mean accuracy for that bin across the dataset
+    """
+    assert type(alpha) == int, "alpha must be an integer"
+    assert alpha > 0, "alpha must be greater than 0"
 
-    metr_acc = torchmetrics.functional.accuracy(preds=preds, target=labels, task=task , average=average, num_classes=num_classes).item()
-    f1 = torchmetrics.functional.f1_score(preds=preds, target=labels, task=task, average=average, num_classes=num_classes).item()
-    confmat = torchmetrics.functional.confusion_matrix(preds=preds, target=labels, task=task, num_classes=num_classes).detach()
+    accumulative_acc_per_bin = defaultdict(int)
+    bin_count = defaultdict(int)
+    mean_accuracy_per_bin = dict()
+    preds_grouped = defaultdict(list)
 
-    auroc = torchmetrics.functional.auroc(
-        preds=values,
-        target=labels,
-        task=task,
-        average=average,
-        thresholds=THRESHOLDS,
-        num_classes=num_classes,
-    ).item()
-    ap = torchmetrics.functional.average_precision(
-        preds=values,
-        target=labels,
-        task=task,
-        average=average,
-        thresholds=THRESHOLDS,
-        num_classes=num_classes,
-    ).item()
+    # group predictions per video using the clip id (video identifier) and toa (time of accident) information
+    for pred, (clip_id, toa) in zip(preds, clip_infos):
+        preds_grouped[(int(clip_id), int(toa))].append(pred)
 
-    return metr_acc, f1, auroc, ap, confmat
+    # reverse predictions to calculate bin accuracy starting from bin closest to collision to No Collision Soon bin
+    for clip_info, preds in preds_grouped.items():
+        preds_reversed = torch.flip(torch.tensor(preds), dims=(0,))
 
-def prediction_lead_time(preds, labels):
+        # group the data into bins of (bin_width*fps) frames until reaching the alpha threshold and group the rest into the last bin (No Coll. Soon)
+        # then compute accuracy per bin as the fraction of predictions falling between the bin's TTC boundaries
+        if len(preds_reversed) <= alpha*fps:
+            preds_subsets = [preds_reversed[i:i+int(fps*bin_width)] for i in range(0, len(preds_reversed), int(fps*bin_width))]
+        else:
+            subsets = [preds_reversed[i:i+int(fps*bin_width)] for i in range(0, int(alpha*fps), int(fps*bin_width))]
+            last_subset = preds_reversed[int(alpha*fps):]
+            preds_subsets = subsets + [last_subset]
 
-    preds_softmax = torch.nn.functional.softmax(preds, dim=1)
-    print(f"Predictions shape: {preds_softmax.shape}, Labels: {np.unique(labels)}")
-    accuracy_per_label  = torchmetrics.functional.accuracy(preds=preds_softmax, 
-                                                           target=labels, 
-                                                           task="multiclass" , 
-                                                           average=None, 
-                                                           num_classes=preds_softmax.shape[1])
-    below_threshold = torch.where(accuracy_per_label < 0.5)[0]
-    if len(below_threshold) == 0:
-        pred_lead_time = 0
-    else:
-        index = below_threshold[0].item()
-        pred_lead_time = index - 1
+        for i in range(0, len(preds_subsets)):
+            if i*bin_width < int(alpha):
+                mask = (preds_subsets[i] >=i*bin_width) & (preds_subsets[i] < (i+1)*bin_width)
+            else:
+                mask = (preds_subsets[i] >= alpha)
 
-    return accuracy_per_label, pred_lead_time
+            accuracy = sum(mask)/len(mask) if len(mask) > 0 else 0
+            accumulative_acc_per_bin[i] += accuracy
+            bin_count[i] += 1
 
-def mean_mae_per_label(preds, labels):
+    # compute mean accuracy per bin across the dataset
+    for key, value in bin_count.items():
+        if key == int(alpha/bin_width):
+            mean_accuracy_per_bin[f"no_coll_soon"] = accumulative_acc_per_bin[key]/value if value > 0 else 0
+        else:
+            mean_accuracy_per_bin[f"coll_{(key+1)*bin_width:.2f}s"] = accumulative_acc_per_bin[key]/value if value > 0 else 0        
 
-    mean_mae_per_label = []
-    print(labels)
-    for label in np.unique(labels):
-        mask = labels == label
-        preds_label = preds[mask]
-        labels_label = labels[mask]
-
-        mean_mae = np.abs(preds_label - labels_label).mean()
-        mean_mae_per_label.append(mean_mae)
-
-    return torch.tensor(mean_mae_per_label)
+    return mean_accuracy_per_bin
