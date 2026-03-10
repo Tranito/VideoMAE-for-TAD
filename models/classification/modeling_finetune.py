@@ -6,9 +6,6 @@ import torch.nn.functional as F
 from timm.models.layers import drop_path, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 import torch.utils.checkpoint as checkpoint
-from models.classification.masking_generator import TubeMaskingGenerator
-from models.classification.token_masking import TokenMasking
-
 
 def _cfg(url='', **kwargs):
     return {
@@ -237,7 +234,9 @@ class VisionTransformer(nn.Module):
                  all_frames=16,
                  tubelet_size=2,
                  use_checkpoint=False,
-                 final_reduction="fc_norm"):
+                 final_reduction="fc_norm",
+                 **kwargs
+                 ):
         super().__init__()
         self.num_classes = num_classes
         self.num_heads = num_heads
@@ -247,9 +246,6 @@ class VisionTransformer(nn.Module):
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, num_frames=all_frames, tubelet_size=self.tubelet_size)
         num_patches = self.patch_embed.num_patches
         self.use_checkpoint = use_checkpoint
-
-        if use_flash_attn:
-            print("Using Flash Attention!")
 
         if use_learnable_pos_emb:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))

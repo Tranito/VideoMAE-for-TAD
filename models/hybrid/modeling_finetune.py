@@ -236,7 +236,7 @@ class VisionTransformer(nn.Module):
                  tubelet_size=2,
                  use_checkpoint=False,
                  final_reduction="fc_norm",
-                 uncertainty_pred=False
+                 uncertainty_pred=False,
                  ):
         super().__init__()
         self.num_heads = num_heads
@@ -277,11 +277,12 @@ class VisionTransformer(nn.Module):
         self.head1 = nn.Sequential(nn.Linear(embed_dim, 256),
                                    nn.GELU(),
                                    nn.Linear(256, 1))
-        
         if self.uncertainty_pred:
             self.head2 = nn.Sequential(nn.Linear(embed_dim, 128),
                                     nn.GELU(),
                                     nn.Linear(128, 1))
+        self.head3 = nn.Linear(embed_dim, 2)
+        
 
         if use_learnable_pos_emb:
             trunc_normal_(self.pos_embed, std=.02)
@@ -303,6 +304,9 @@ class VisionTransformer(nn.Module):
     @torch.jit.ignore
     def no_weight_decay(self):
         return {'pos_embed', 'cls_token'}
+
+    # def get_classifier(self):
+    #     return self.head
 
     def reset_classifier(self, num_classes, global_pool=''):
         self.num_classes = num_classes
@@ -341,10 +345,11 @@ class VisionTransformer(nn.Module):
     def forward(self, x):
         x = self.forward_features(x)
 
+        mean_ttc = self.head1(self.fc_dropout(x))
+        binary_head_logits = self.head3(self.fc_dropout(x))
+
         if self.uncertainty_pred:
-            mean_ttc = self.head1(self.fc_dropout(x))
             log_variance = self.head2(self.fc_dropout(x))
-            return mean_ttc, log_variance
-        else:  
-            mean_ttc = self.head1(self.fc_dropout(x))
-            return mean_ttc
+            return mean_ttc, log_variance, binary_head_logits
+        else:
+            return mean_ttc, binary_head_logits

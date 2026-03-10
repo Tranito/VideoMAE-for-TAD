@@ -2,41 +2,40 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from models.regression.modeling_finetune import VisionTransformer
+from models.hybrid.modeling_finetune import VisionTransformer
 from functools import partial
 from timm.models.layers import drop_path, to_2tuple, trunc_normal_
 
 
 
-class VITRegression(nn.Module):
+class VITHybrid(nn.Module):
     def __init__(
             self,
             img_size: int,
             patch_size: int = 14,
             all_frames: int = 16,
             uncertainty_pred: bool = False,
-            model_ckpt: Optional[str] = None
+            model_ckpt: Optional[str] = None,
     ):
         super().__init__()
         self.img_size = img_size
         self.patch_size = patch_size
         self.uncertainty_pred = uncertainty_pred
-        self.embed_dim = 384
-        self.model_ckpt = model_ckpt
-
+        self.embed_dim = 384 # for ViT Small
         self.model = VisionTransformer(patch_size=16, 
                                        embed_dim=self.embed_dim, 
-                                       depth=12, 
-                                       num_heads=6, 
-                                       mlp_ratio=4, 
-                                       qkv_bias=True,
+                                       depth=12,  
+                                       num_heads=6,
+                                       mlp_ratio=4,
+                                       qkv_bias=True, 
                                        norm_layer=partial(nn.LayerNorm, eps=1e-6), 
-                                       use_flash_attn=True, drop_path_rate=0.3, 
+                                       use_flash_attn=True,
+                                       drop_path_rate=0.3,
                                        all_frames=all_frames, 
-                                       img_size=img_size,
-                                       uncertainty_pred=uncertainty_pred
-                                       )
-         # Load pre-trained VideoMAE weights
+                                       img_size=img_size,  
+                                       uncertainty_pred=self.uncertainty_pred)
+
+        self.model_ckpt = model_ckpt
         self._load_pretrained_weights()
 
     def _load_pretrained_weights(self):
@@ -56,13 +55,8 @@ class VITRegression(nn.Module):
             filtered_weights = {k.lstrip("network.model."):v for k, v in weights.items()}
             self.model.load_state_dict(filtered_weights, strict=True)
 
-       
     def forward(self, clip):
         b, c, n, h, w = clip.shape
         assert h == w
-        if self.uncertainty_pred:
-            mean_ttc, log_variance = self.model(clip)
-            return mean_ttc, log_variance
-        else:
-            mean_ttc = self.model(clip)
-            return mean_ttc
+        predictions = self.model(clip)
+        return predictions
