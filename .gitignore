@@ -3,9 +3,7 @@
 *.sh
 */wandb/
 */lightning_logs/
-*/__pycache__
-datasets/sveta/*
-*.pyc
-pkl_files_for_videos/*
 *.ipynb
 *.pkl
+*/__init__.pyc
+*/__pycache__/*
