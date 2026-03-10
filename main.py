@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 import torch
 from gitignore_parser import parse_gitignore
@@ -18,10 +19,26 @@ class LightningCLI(cli.LightningCLI):
     def add_arguments_to_parser(self, parser):
         parser.add_argument("--compile", type=bool, default=False)
         parser.add_argument("--root", type=str)
-        parser.add_argument("--dataset", type=str, default="dota")
-        # parser.add_argument('--input_size', type=int, default=224, help='videos input size')
+        parser.add_argument("--dataset", type=str, default="dada")
 
-        # parser.link_arguments("input_size", "data.init_args.input_size")
+        parser.add_argument("--alpha", type=int, default=6)
+        parser.add_argument("--bin_width", type=float, default=1.0)
+        parser.add_argument("--uncertainty_pred", type=bool, default=False)
+        parser.add_argument("--model_ckpt", type=Optional[str], default=None)
+
+        parser.link_arguments("alpha", "data.init_args.alpha")
+        parser.link_arguments("alpha", "model.init_args.network.init_args.alpha")
+        parser.link_arguments("alpha", "model.init_args.alpha")
+
+        parser.link_arguments("bin_width", "data.init_args.bin_width")
+        parser.link_arguments("bin_width", "model.init_args.network.init_args.bin_width")
+        parser.link_arguments("bin_width", "model.init_args.bin_width")
+
+        parser.link_arguments("uncertainty_pred", "model.init_args.uncertainty_pred")
+        parser.link_arguments("uncertainty_pred", "model.init_args.network.init_args.uncertainty_pred")
+
+        parser.link_arguments("model_ckpt", "model.init_args.network.init_args.model_ckpt")
+
         parser.link_arguments("root", "data.init_args.root")
         parser.link_arguments("dataset", "data.init_args.dataset")
         parser.link_arguments("root", "trainer.logger.init_args.save_dir")
@@ -29,9 +46,7 @@ class LightningCLI(cli.LightningCLI):
         parser.link_arguments("data.init_args.batch_size", "model.init_args.batch_size")
         parser.link_arguments("data.init_args.img_size", "model.init_args.img_size")
         parser.link_arguments("data.init_args.img_size", "model.init_args.network.init_args.img_size")
-        
         parser.link_arguments("data.init_args.num_frames", "model.init_args.network.init_args.all_frames")
-        parser.link_arguments("data.init_args.multi_class", "model.init_args.multi_class")
 
     def fit(self, model, **kwargs):
         if hasattr(self.trainer.logger.experiment, "log_code"):
