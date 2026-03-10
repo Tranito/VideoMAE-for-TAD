@@ -1306,6 +1306,7 @@ def pad_wide_clips(h, w, crop_size, is_train=False):
         'reflect', 'reflect',
         'replicate', 'replicate'
         )
+    # only use black and colored padding during training and black padding during validaiton
     if is_train:
         choice = np.random.choice([6,7])
     else:
