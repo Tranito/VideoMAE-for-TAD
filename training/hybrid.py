@@ -7,19 +7,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import PolynomialLR
+from torchmetrics.classification import MulticlassAccuracy
 import torchvision.transforms as transforms
+from torchvision.transforms import functional
 import numpy as np
 import pickle
 from models.utils.warmup_and_linear_scheduler import WarmupAndLinearScheduler
 from training.optim_factory import get_vit_parameter_groups
-from new_metrics import accuracy_per_bin_regression
 from .visualization_utils import log_image, create_bar_chart
 import matplotlib.pyplot as plt
 import wandb
 from PIL import Image
 import io
 
-class Regression(lightning.LightningModule):
+class Hybrid(lightning.LightningModule):
     def __init__(
             self,
             batch_size: int,
@@ -34,9 +35,9 @@ class Regression(lightning.LightningModule):
             ignore_index: int = 255,
             lr_mode: str = "warmuplinear",
             eta_min: float = 1e-6,
-            alpha: int = 6,
-            bin_width: float = 1.0,
             uncertainty_pred: bool = False,
+            alpha: float = 6.0,
+            bin_width: float = 1.0,
     ):
         super().__init__()
         self.job_id = os.environ.get('SLURM_JOB_ID')
@@ -52,15 +53,12 @@ class Regression(lightning.LightningModule):
         self.lr_mode = lr_mode
         self.save_hyperparameters()
         self.eta_min = eta_min
-        self.alpha = alpha
-        self.uncertainty_pred = uncertainty_pred
-        self.bin_width = bin_width
         self.network = network
-
-        # self.label2name = get_label2name()
         self.val_ds_names = ["val"]
-
         self.automatic_optimization = False
+        self.alpha = alpha
+        self.bin_width = bin_width
+        self.uncertainty_pred = uncertainty_pred
 
         # for saving predictions and labels for calculating eval metrics and clip info for TTA (only for DADA2K)
         self.all_preds = []
@@ -68,12 +66,32 @@ class Regression(lightning.LightningModule):
         self.clip_infos = []
         self.sample_idx = []
         self.all_log_variances = []
+        self.binary_head_preds = []
+        self.binary_head_targets = []
+        self.bin_labels = []
+        self.hybrid_model_bin_preds = []
 
-    def get_optimizers(self):
-        opt = self.optimizers()
-        opt.zero_grad()
-        return opt
-    
+    def get_bin_predictions(self, binary_head_preds, regression_preds):
+        """Converts the hybrid model's TTC and binary heads predictions into a bin prediction"""
+
+        binary_head_prob = F.softmax(binary_head_preds, dim=1)
+        #take only Collision Soon class predictions
+        binary_head_coll_soon_prob = binary_head_prob[:,1]
+        bin_preds = []
+
+        for i, pred in enumerate(binary_head_coll_soon_prob):
+            if pred < 0.5:
+                bin_preds.append(0)
+            else:
+                if regression_preds[i] < 0:
+                    bin_preds.append(1)
+                elif regression_preds[i] > self.alpha:
+                    bin_preds.append(int(self.alpha))
+                else:
+                    bin_preds.append(int(torch.ceil(regression_preds[i])))
+
+        return torch.tensor(bin_preds)
+
     def loss(self, predictions, targets, alpha, *args):
         """
         Computes loss for Collision Soon and No Collision Soon region separately.
@@ -115,6 +133,7 @@ class Regression(lightning.LightningModule):
 
     def compute_bin_loss(self, ttc_pred, ttc_label, bin_labels, log_prefix, *args):
         """ Computes loss and TTC error for each "Collision Soon bin and logs them to wandb"""
+
         with torch.no_grad():
             for bin_id in range(1, int(self.alpha/self.bin_width) + 1):
                 mask_bin = (bin_labels == bin_id)
@@ -135,7 +154,7 @@ class Regression(lightning.LightningModule):
 
                     if self.uncertainty_pred:
                         self.log(f"{log_prefix}_log_var_coll_<{bin_id*self.bin_width}s", log_variance[mask_bin].mean(), prog_bar=False)
-            
+
     def training_step(
             self,
             batch: Tuple[torch.Tensor, torch.Tensor],
@@ -144,15 +163,14 @@ class Regression(lightning.LightningModule):
         opt = self.get_optimizers()
         b_image, ttc_target, bin_labels = batch[0], batch[-1], batch[1]
         # b_image = (B, C, T, H, W)
+       
 
         alpha = self.alpha
-
         mask_A = (ttc_target <= alpha)
-        mask_B = ~mask_A
 
         if self.uncertainty_pred:
             predictions = self.network(b_image)
-            ttc_pred, log_variance = predictions[0], predictions[1]
+            ttc_pred, log_variance, binary_head_logits = predictions[0], predictions[1], predictions[2]
             ttc_pred = ttc_pred.squeeze(-1)
             log_variance = log_variance.squeeze(-1)
        
@@ -160,23 +178,34 @@ class Regression(lightning.LightningModule):
             self.compute_bin_loss(ttc_pred, ttc_target, bin_labels, "train", log_variance)
             
         else:
-            ttc_pred = self.network(b_image)
+            predictions = self.network(b_image)
+            ttc_pred, binary_head_logits = predictions[0], predictions[1]
             ttc_pred = ttc_pred.squeeze(-1)       
 
             loss_A, loss_B = self.loss(ttc_pred, ttc_target, self.alpha)
             self.compute_bin_loss(ttc_pred, ttc_target, bin_labels, "train")
-       
-        loss_source = loss_A + loss_B
 
+        classification_loss = F.cross_entropy(binary_head_logits, mask_A.long(), reduction='mean')
+        loss_source = loss_A + loss_B + classification_loss
+            
         self.manual_backward(loss_source)
         opt.step()
         self.lr_schedulers().step()
-        self.log("loss", loss_source, prog_bar=True)
+        
+        self.log("train loss", loss_source, prog_bar=True)
+        self.log("train loss coll_soon", loss_A)
+        self.log("train loss no_coll_soon", loss_B)
+        self.log("train loss binary head", classification_loss)
 
         with torch.no_grad():
             if (self.global_step % 10) == 0:
                 mae = torch.mean(torch.abs(ttc_pred.cpu() - ttc_target.cpu()))
                 self.log(f"mae", mae, prog_bar=True)
+
+                source_predicted_segmentation = torch.argmax(binary_head_logits.detach(), dim=1)
+                acc_source = (source_predicted_segmentation == mask_A.float())
+                acc_source = acc_source.float().mean()
+                self.log("acc", acc_source, prog_bar=False)
 
             if (self.global_step % 100) == 0:
                 log_image(b_image[0], "train", self.trainer.logger)
@@ -188,52 +217,56 @@ class Regression(lightning.LightningModule):
             dataloader_idx: int,
             log_prefix: str,
     ):
-        b_image, ttc_target, sample_idx, bin_labels = batch[0], batch[-1], batch[2], batch[1]
+        b_image, ttc_target, sample_idx, bin_lbl = batch[0], batch[-1], batch[2], batch[1]
         self.clip_infos.extend(zip(batch[3], batch[4]))
-        
+        alpha = self.alpha
+        mask_A = (ttc_target <= alpha)
+        mask_B = ~mask_A
         with torch.no_grad():
-            alpha = self.alpha
-            mask_A = (ttc_target <= alpha)
-            mask_B = ~mask_A
-
             if self.uncertainty_pred:
                 predictions = self.network(b_image)
-                ttc_pred, log_variance = predictions[0], predictions[1]
-                ttc_pred = ttc_pred.squeeze(-1)
+                ttc_pred, log_variance, binary_head_logits = predictions[0], predictions[1], predictions[2]
+                mean_ttc = ttc_pred.squeeze(-1)
                 log_variance = log_variance.squeeze(-1)
                 self.all_log_variances.append(log_variance)
-        
-                loss_A, loss_B = self.loss(ttc_pred, ttc_target, self.alpha, log_variance)
-                self.compute_bin_loss(ttc_pred, ttc_target, bin_labels, "train", log_variance)
-                
-            else:
-                ttc_pred = self.network(b_image)
-                ttc_pred = ttc_pred.squeeze(-1)       
+                var = (log_variance.exp() + 1e-8)
 
+                loss_A, loss_B = self.loss(ttc_pred, ttc_target, self.alpha, log_variance)
+                self.compute_bin_loss(ttc_pred, ttc_target, bin_lbl, log_prefix, log_variance)
+
+            else:
+                predictions = self.network(b_image)
+                ttc_pred, binary_head_logits = predictions[0], predictions[1]
+                mean_ttc = ttc_pred.squeeze(-1)
                 loss_A, loss_B = self.loss(ttc_pred, ttc_target, self.alpha)
-                self.compute_bin_loss(ttc_pred, ttc_target, bin_labels, "train")
-            loss_source = loss_A + loss_B
+                self.compute_bin_loss(ttc_pred, ttc_target, bin_lbl, log_prefix)
 
             self.all_preds.append(ttc_pred)
             self.all_labels.append(ttc_target) 
             self.sample_idx.append(sample_idx)
+            self.bin_labels.append(bin_lbl)
+
+            classification_loss = F.cross_entropy(binary_head_logits, mask_A.long(), reduction='mean')
+            #FOR CLASSIFICATION
+            self.binary_head_preds.append(binary_head_logits)
+            self.binary_head_targets.append(mask_A.long())
+
+            loss_source = loss_A + loss_B + classification_loss
 
             self.log(f"{log_prefix}_loss", loss_source, prog_bar=True, sync_dist=True)
-            self.log(f"{log_prefix}_loss_col_soon", loss_A, sync_dist=True)
-            self.log(f"{log_prefix}_loss_no_col_soon", loss_B, sync_dist=True)
-            self.log(f"{log_prefix}_error_col_soon", (ttc_pred[mask_A] - ttc_target[mask_A]).abs().mean() if mask_A.any() else torch.tensor(0.,device=ttc_target.device), sync_dist=True)
-            self.log(f"{log_prefix}_error_no_col_soon", (ttc_pred[mask_B] - ttc_target[mask_B]).abs().mean() if mask_B.any() else torch.tensor(0.,device=ttc_target.device), sync_dist=True)
+            self.log(f"{log_prefix}_loss_classification", classification_loss, sync_dist=True, prog_bar=False)
+            self.log(f"{log_prefix}_loss_col_soon", loss_A, sync_dist=True, prog_bar=False)
+            self.log(f"{log_prefix}_loss_no_col_soon", loss_B, sync_dist=True, prog_bar=False)
 
             if self.uncertainty_pred:
-                self.log(f"{log_prefix}_log_var_col_soon", log_variance[mask_A].mean() if mask_A.any() else torch.tensor(0.,device=ttc_target.device),  sync_dist=True)
-                self.log(f"{log_prefix}_log_var_no_col_soon", log_variance[mask_B].mean() if mask_B.any() else torch.tensor(0.,device=ttc_target.device), prog_bar=True, sync_dist=True)
+                self.log(f"{log_prefix}_log(var)_col_soon", log_variance[mask_A].mean() if mask_A.any() else torch.tensor(0.,device=ttc_target.device),  sync_dist=True, prog_bar=False)
+                self.log(f"{log_prefix}_log(var)_no_col_soon", log_variance[mask_B].mean() if mask_B.any() else torch.tensor(0.,device=ttc_target.device),  sync_dist=True, prog_bar=False)
 
             if (batch_idx % 100) == 0:
-                log_image(b_image[0], log_prefix, self.trainer.logger)
+                log_image(b_image[0], log_prefix, self.trainer.logger) 
 
-            mae = torch.mean(torch.abs(ttc_pred.cpu() - ttc_target.cpu()))
-            self.log(f"{log_prefix}_mae", mae, prog_bar=True)
-
+            mae = torch.mean(torch.abs(mean_ttc.cpu() - ttc_target.cpu()))
+            self.log(f"{log_prefix}_mean_TTC_error_(absolute)", mae, prog_bar=False)       
 
     def validation_step(
             self,
@@ -253,65 +286,85 @@ class Regression(lightning.LightningModule):
 
     def _on_eval_epoch_end(self, log_prefix):
         
-        
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
         
-        self.all_preds = torch.cat(self.all_preds, dim=0).type(torch.float16) if self.all_preds[0].dtype == torch.int64 else torch.cat(self.all_preds, dim=0)
+        self.all_preds = torch.cat(self.all_preds, dim=0)
         self.all_labels = torch.cat(self.all_labels, dim=0)
-        self.clip_infos = torch.tensor(self.clip_infos) 
+        self.clip_infos = torch.tensor(self.clip_infos)
         self.sample_idx = torch.cat(self.sample_idx, dim=0)
+        self.binary_head_preds = torch.cat(self.binary_head_preds, dim=0)
+        self.binary_head_targets = torch.cat(self.binary_head_targets, dim=0)
 
-        if self.uncertainty_pred:
-            self.all_log_variances = torch.cat(self.all_log_variances, dim=0)
+        self.bin_labels = torch.cat(self.bin_labels, dim=0)
 
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
             
-        # gather data from all processes (GPUs)
-        self.all_preds = self.all_gather(self.all_preds)
-        self.all_preds = self.all_preds.reshape(-1)
+        # Gather data from all processes
+        self.all_preds = self.all_gather(self.all_preds).reshape(-1)
         self.all_labels = self.all_gather(self.all_labels).reshape(-1)
         self.clip_infos = self.all_gather(self.clip_infos).reshape(-1, 2)
-        self.sample_idx = self.all_gather(self.sample_idx).reshape(-1)
-
-        if self.uncertainty_pred: 
-            self.all_log_variances = self.all_gather(self.all_log_variances).reshape(-1)
+        self.sample_idx = self.all_gather(self.sample_idx).reshape(-1) 
         
+        self.binary_head_preds = self.all_gather(self.binary_head_preds).reshape(-1,2)
+        self.binary_head_targets = self.all_gather(self.binary_head_targets).reshape(-1)
+        self.bin_labels = self.all_gather(self.bin_labels).reshape(-1)
+
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
-        # sort preds and labels such their order for each video is preserved for visualization
+        # sort preds and labels such their order for each clip is preserved for visualization
         sorted_indices = self.sample_idx.argsort()    
         self.all_preds, self.all_labels, self.clip_infos = self.all_preds[sorted_indices], self.all_labels[sorted_indices], self.clip_infos[sorted_indices]
+        self.binary_head_preds = self.binary_head_preds[sorted_indices]
+        self.binary_head_targets = self.binary_head_targets[sorted_indices]
+        self.bin_labels = self.bin_labels[sorted_indices]
         self.sample_idx = self.sample_idx[sorted_indices]
-        
-        if self.uncertainty_pred:
-            self.all_log_variances = self.all_log_variances[sorted_indices]
 
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
+        if self.uncertainty_pred:
+            self.all_log_variances = torch.cat(self.all_log_variances, dim=0)
+            self.all_log_variances = self.all_gather(self.all_log_variances).reshape(-1)
+            self.all_log_variances = self.all_log_variances[sorted_indices]
+
         if self.global_rank == 0:
-            mean_accuracy_per_bin = accuracy_per_bin_regression(self.all_preds, self.clip_infos, alpha=self.alpha, bin_width=self.bin_width, fps=30)
-            create_bar_chart(torch.tensor(list(mean_accuracy_per_bin.values()))*100, log_prefix, self.trainer.logger, bin_width=self.bin_width)
+
+            hybrid_model_bin_preds = self.get_bin_predictions(self.binary_head_preds, self.all_preds)
+            self.hybrid_model_bin_preds.append(hybrid_model_bin_preds)
+
+            bin_accuracy_func = MulticlassAccuracy(num_classes= int(self.alpha/self.bin_width) + 1, average=None)
+            bin_accuracies = bin_accuracy_func(hybrid_model_bin_preds.cpu(), self.bin_labels.cpu())
+            # display bin accuracies
+            create_bar_chart(torch.roll(bin_accuracies, shifts=(-1))*100, log_prefix, self.trainer.logger, bin_width=self.bin_width)
+
+            # mean accuracy for binary head for reconizing No Collision Soon and Collision Soon samples
+            acc_per_class = MulticlassAccuracy(num_classes=2, average=None)
+            acc_per_class_val = acc_per_class(self.binary_head_preds.softmax(dim=1).cpu(), self.binary_head_targets.cpu())
+
+            self.log(f"{log_prefix}_mean_acc_binary_head_No_Coll_Soon", acc_per_class_val[0], prog_bar=False)
+            self.log(f"{log_prefix}_mean_acc_binary_head_Col_Soon", acc_per_class_val[1], prog_bar=False)
+
+            data_to_save = {
+                        "all_preds": self.all_preds.cpu(),
+                        "all_labels": self.all_labels.cpu(),
+                        "clip_infos": self.clip_infos.cpu(),
+                        "sample_idx": self.sample_idx.cpu(),
+                        "binary_head_preds": self.binary_head_preds.cpu(),
+                        "binary_head_targets": self.binary_head_targets.cpu(),
+                        "bin_labels": self.bin_labels.cpu(),
+                        "hybrid_model_bin_preds": torch.stack(self.hybrid_model_bin_preds).cpu(),
+                    }
+            if self.uncertainty_pred:
+                file_name = f"hybrid_w_uncertainty_alpha_{self.alpha}s_bin_width_{self.bin_width}s.pkl"
+                data_to_save["all_log_variances"] = self.all_log_variances.cpu()
+            else:
+                file_name = f"hybrid_no_uncertainty_alpha_{self.alpha}s_bin_width_{self.bin_width}s.pkl"
 
             # save all data from last validation for visualization
             if self.global_step > 19000:
-
-                data_to_save = {
-                    "all_preds": self.all_preds.cpu(),
-                    "all_labels": self.all_labels.cpu(),
-                    "clip_infos": self.clip_infos.cpu(),
-                    "sample_idx": self.sample_idx.cpu(),
-                }
-
-                if self.uncertainty_pred:
-                    file_name = f"Regression_w_uncertainty_alpha{self.alpha}_binwidth{self.bin_width}.pkl"
-                    data_to_save["all_log_variances"] = self.all_log_variances.cpu()
-                else:
-                    file_name = f"Regression_alpha{self.alpha}_binwidth{self.bin_width}.pkl"
-                
                 with open(file_name, "wb") as f:
                     pickle.dump(data_to_save, f)
 
@@ -319,6 +372,10 @@ class Regression(lightning.LightningModule):
             torch.distributed.barrier()
 
         self.all_preds, self.all_labels, self.clip_infos, self.sample_idx, self.all_log_variances = [], [], [], [], []
+        self.binary_head_preds, self.binary_head_targets = [], []
+
+        self.bin_labels = []
+        self.hybrid_model_bin_preds = []
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end("val")
@@ -340,7 +397,9 @@ class Regression(lightning.LightningModule):
         verbose=False
         )
         
-        optimizer = torch.optim.AdamW(optim_weights, betas=(0.9, 0.999))
+        all_params = optim_weights
+
+        optimizer = torch.optim.AdamW(all_params, betas=(0.9, 0.999))
         print(f"lr_mode: {self.lr_mode}")
         if self.lr_mode == "poly":
             lr_scheduler = {
@@ -376,3 +435,8 @@ class Regression(lightning.LightningModule):
             raise Exception("Wrong lr_more: {}".format(self.lr_mode))
 
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
+    
+    def get_optimizers(self):
+        opt = self.optimizers()
+        opt.zero_grad()
+        return opt
