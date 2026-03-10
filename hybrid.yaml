@@ -3,7 +3,7 @@ trainer:
    class_path: lightning.pytorch.loggers.wandb.WandbLogger
    init_args:
      resume: allow
-     name: "Regression lr=2e-5 b32, alpha6, bin_width 1, lyr decay 0.7"
+     name: "Hybrid model lr=2e-5 b32, alpha6, bin width 1, lyr decay 0.6"
      project: "vitin1k"
   devices: 1
   num_nodes: 1
@@ -11,14 +11,14 @@ trainer:
   val_check_interval: 4000
   check_val_every_n_epoch: null
 model:
-  class_path: training.regression.Regression
+  class_path: training.hybrid.Hybrid
   init_args:
     lr: 2e-5
-    layerwise_lr_decay: 0.7
+    layerwise_lr_decay: 0.6
     lr_mode: "cosine_annealing"
     eta_min: 1e-8
     network:
-      class_path: models.regression.vit_regression.VITRegression
+      class_path: models.hybrid.vit_hybrid.VITHybrid
 data:
   class_path: datasets.dashcamaccident_datamodule.DashcamAccidentDataModule
   init_args:
