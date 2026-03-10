@@ -3,7 +3,7 @@
 
 ## Abstract
 <p align="center">
-  <img src="./comp_earliness_previous_ours.png" width="600" alt="Comparison of earliness evaluation methods">
+  <img src="./comp_earliness_previouswork_ours.png" width="600" alt="Comparison of earliness evaluation methods">
 </p>
 <p>
     <em><b>Fig.1</b> Comparison of model earliness measurements: Previous methods measure earliness as the time between when the accident probability first exceeds the threshold and the accident. However, false positives can cause too early threshold crossings, where the measured earliness (60 frames) does not reflect the actual earliness (30 frames). In contrast, we measure earliness via prediction accuracy across temporal bins within a prediction window of length α, accounting for false positives.</em>
