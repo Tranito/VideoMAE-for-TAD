@@ -1,11 +1,10 @@
-name: vmae
+name: tempbin
 channels:
   - nvidia
   - pytorch
   - conda-forge
   - defaults
 dependencies:
-  - python=3.12
   - lightning
   - lightning-utilities
   - matplotlib
@@ -29,3 +28,4 @@ dependencies:
       - Timm
       - Wandb
       - gitignore-parser
+      - jsonargparse[signatures]>=4.27.7
