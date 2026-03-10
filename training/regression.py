@@ -12,7 +12,7 @@ import numpy as np
 import pickle
 from models.utils.warmup_and_linear_scheduler import WarmupAndLinearScheduler
 from training.optim_factory import get_vit_parameter_groups
-from new_metrics import accuracy_per_bin_regression
+from training.new_metrics import accuracy_per_bin_regression
 from .visualization_utils import log_image, create_bar_chart
 import matplotlib.pyplot as plt
 import wandb
